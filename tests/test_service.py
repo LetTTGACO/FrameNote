@@ -17,25 +17,18 @@ from framenote.galaxy_downloader import GalaxyDownloader
 from framenote.service import Jobs, create_app
 from framenote.service_pipeline import Pipeline, platform_url
 from framenote.service_process import run_process
-from framenote.service_settings import Settings
+from framenote.service_settings import Settings, SenseVoiceConfig
 from framenote.task_store import TaskStore, atomic_json
 
 
 def config(tmp_path, **kwargs):
-    return Settings(workspace=tmp_path, sensevoice_model=tmp_path / "sense", vad_model=tmp_path / "vad", **kwargs)
+    return Settings(workspace=tmp_path, sensevoice=SenseVoiceConfig(tmp_path / "sense", tmp_path / "vad", sys.executable), **kwargs)
 
 
 def client_for(settings):
     return TestClient(create_app(settings), client=("192.168.31.42", 51000))
 
 
-@pytest.fixture
-def video(tmp_path):
-    target = tmp_path / "test.mp4"
-    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=duration=5:size=160x90:rate=25",
-                    "-f", "lavfi", "-i", "sine=frequency=440:duration=5", "-c:v", "libx264", "-g", "100",
-                    "-c:a", "aac", "-shortest", "-y", str(target)], check=True)
-    return target
 
 
 def finished_task(store, video=None):

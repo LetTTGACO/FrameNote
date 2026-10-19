@@ -2,7 +2,8 @@
 from __future__ import annotations
 
 import asyncio
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
+from dataclasses import asdict
 import fcntl
 import json
 import math
@@ -18,6 +19,7 @@ from .frame_extractor import extract_frame
 from .service_mcp import create_mcp
 from .service_pipeline import Pipeline, platform_url
 from .service_settings import Settings
+from .jobs import Jobs
 from .task_store import TERMINAL, TaskStore, atomic_json, public_error
 from .transcript import TranscriptSegment, segments_to_prompt, segments_to_srt
 
@@ -42,71 +44,13 @@ class FramesRequest(BaseModel):
     timestamps: list[float] = Field(min_length=1, max_length=24)
 
 
-class Jobs:
-    def __init__(self, store: TaskStore, pipeline: Pipeline):
-        self.store, self.pipeline = store, pipeline
-        self.queue: asyncio.Queue[str] = asyncio.Queue()
-        self.active: asyncio.Task | None = None
-        self.active_id: str | None = None
-        self.worker: asyncio.Task | None = None
-        self.stopping = False
-
-    async def start(self) -> None:
-        self.queue = asyncio.Queue()
-        self.stopping = False
-        for task_id in self.store.recover():
-            self.queue.put_nowait(task_id)
-        self.worker = asyncio.create_task(self.work())
-
-    async def work(self) -> None:
-        while True:
-            task_id = await self.queue.get()
-            try:
-                if self.store.get(task_id)["status"] != "queued":
-                    continue
-                self.active_id = task_id
-                self.store.update(task_id, status="processing")
-                self.active = asyncio.create_task(self.pipeline.run(task_id, lambda: self.store.get(task_id)["status"] == "cancelled" or self.stopping))
-                try:
-                    await self.active
-                except asyncio.CancelledError:
-                    if self.stopping:
-                        self.store.update(task_id, status="failed", phase="interrupted", error={"code": "interrupted", "message": "服务停止，已保留材料。"})
-                        raise
-                    self.store.update(task_id, status="cancelled", phase="cancelled")
-                except Exception as error:
-                    phase = self.store.get(task_id)["phase"]
-                    self.store.update(task_id, status="failed", error={"code": phase + "_failed", "message": public_error(error)})
-            finally:
-                self.active = None
-                self.active_id = None
-                self.queue.task_done()
-
-    def enqueue(self, task_id: str) -> None:
-        self.store.update(task_id, status="queued", phase="queued")
-        self.queue.put_nowait(task_id)
-
-    def cancel(self, task_id: str) -> dict:
-        task = self.store.get(task_id)
-        if task["status"] in TERMINAL:
-            return task
-        task = self.store.update(task_id, status="cancelled", phase="cancelled")
-        if self.active_id == task_id and self.active:
-            self.active.cancel()
-        return task
-
-    async def stop(self) -> None:
-        self.stopping = True
-        if self.worker:
-            self.worker.cancel()
-            with suppress(asyncio.CancelledError):
-                await self.worker
-
 
 def create_app(settings: Settings | None = None, pipeline: Pipeline | None = None) -> FastAPI:
     config = settings or Settings.from_env()
     store = TaskStore(config.workspace / "tasks")
-    jobs = Jobs(store, pipeline or Pipeline(config, store))
+    runtime_pipeline = pipeline if pipeline is not None else Pipeline(config, store)
+    backend = runtime_pipeline.backend
+    jobs = Jobs(store, runtime_pipeline)
     frame_locks: dict[str, asyncio.Lock] = {}
     remote_mcp = create_mcp()
     mcp_app = remote_mcp.streamable_http_app()
@@ -118,6 +62,7 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
                 fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except BlockingIOError as exc:
                 raise RuntimeError("Workspace already in use; run exactly one service worker") from exc
+            await asyncio.to_thread(backend.health)
             await jobs.start()
             try:
                 async with remote_mcp.session_manager.run():
@@ -126,7 +71,7 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
                 await jobs.stop()
 
     app = FastAPI(title="FrameNote", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-    app.state.store, app.state.jobs = store, jobs
+    app.state.store, app.state.jobs, app.state.backend = store, jobs, backend
 
     @app.exception_handler(KeyError)
     async def not_found(request: Request, error: KeyError):
@@ -134,9 +79,14 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
 
     @app.get("/api/health")
     async def health():
-        return {"status": "ok", "service": "FrameNote", "mode": "headless", "asr": "SenseVoiceSmall-onnx-int8",
-                "asr_models_present": all((p / "model_quant.onnx").is_file() for p in (config.sensevoice_model, config.vad_model)),
-                "galaxy_enabled": config.galaxy_enabled}
+        status = backend.health()
+        return {"status": "ok", "service": "FrameNote", "mode": "headless", "asr": status.backend,
+                "asr_models_present": status.configured, "backend": asdict(status), "galaxy_enabled": config.galaxy_enabled}
+
+    @app.get("/api/ready")
+    async def ready():
+        status = backend.health()
+        return JSONResponse(asdict(status), status_code=200 if status.available else 503)
 
     @app.post("/api/upload")
     async def upload(file: UploadFile = File(...), title: str = Form("", max_length=300)):

@@ -1,4 +1,5 @@
 import json
+import sys
 
 from mcp.types import ImageContent, TextContent
 import pytest
@@ -6,7 +7,7 @@ import httpx
 
 from framenote import service_mcp
 from framenote.service import create_app
-from framenote.service_settings import Settings
+from framenote.service_settings import Settings, SenseVoiceConfig
 from fastapi.testclient import TestClient
 
 
@@ -35,7 +36,7 @@ def test_remote_http_mcp_initialize_tools_and_native_image(tmp_path, monkeypatch
     async def request(method, path, **kwargs):
         return httpx.Response(200, content=b"jpeg-example", headers={"content-type": "image/jpeg"})
     monkeypatch.setattr(service_mcp, "request", request)
-    settings = Settings(workspace=tmp_path, sensevoice_model=tmp_path / "sense", vad_model=tmp_path / "vad")
+    settings = Settings(workspace=tmp_path, sensevoice=SenseVoiceConfig(tmp_path / "sense", tmp_path / "vad", sys.executable))
     # Separate app instances must have independent session manager lifetimes.
     for _ in range(2):
         app = create_app(settings)

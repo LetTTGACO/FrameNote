@@ -10,6 +10,7 @@ import hashlib
 import importlib.metadata
 import json
 import os
+import platform
 from pathlib import Path
 import re
 import time
@@ -66,9 +67,10 @@ def main() -> None:
     result = {"engine": "SenseVoiceSmall-onnx-int8", "timestamp_kind": "VAD_interval",
               "duration": duration, "language": "auto", "textnorm": "withitn",
               "threads": args.threads, "batch_size": 1, "load_seconds": load_seconds,
-              "versions": {key: importlib.metadata.version(key) for key in ("funasr-onnx", "onnxruntime", "numpy")},
+              "versions": {key: importlib.metadata.version(key) for key in ("framenote", "funasr-onnx", "onnxruntime", "numpy", "soundfile")},
               "model_sha256": hashlib.sha256((args.model / "model_quant.onnx").read_bytes()).hexdigest(),
-              "vad_intervals": intervals, "raw": [], "segments": []}
+              "vad_sha256": hashlib.sha256((args.vad / "model_quant.onnx").read_bytes()).hexdigest(),
+              "python_version": platform.python_version(), "vad_intervals": intervals, "raw": [], "segments": []}
     with args.output.with_suffix(".partial.jsonl").open("w") as partial:
         for index, (start, end) in enumerate(intervals):
             raw = model(audio[round(start * rate):round(end * rate)], language="auto", textnorm="withitn")
