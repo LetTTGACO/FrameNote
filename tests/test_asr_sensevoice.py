@@ -112,3 +112,32 @@ async def test_worker_errors_keep_stable_codes(backend,tmp_path,monkeypatch,fail
     with pytest.raises(ASRError) as error:
         await backend.transcribe(ASRRequest(audio,2,tmp_path),on_progress=lambda p:None,cancelled=lambda:False)
     assert error.value.code==code
+
+
+@pytest.mark.asyncio
+async def test_installed_backend_preserves_selected_python_search_path(tmp_path,monkeypatch):
+    import subprocess
+    from framenote.asr import sensevoice
+    from framenote.asr.types import ASRProvenance,BackendHealth
+    parent=tmp_path/"parent-site-packages"
+    selected=tmp_path/"selected-python-modules"
+    parent.mkdir()
+    selected.mkdir()
+    (parent/"asr_dependency.py").write_text('identity="parent"')
+    (selected/"asr_dependency.py").write_text('identity="selected"')
+    installed=parent/"framenote/asr/sensevoice.py"
+    monkeypatch.setattr(sensevoice,"__file__",str(installed))
+    monkeypatch.setenv("PYTHONPATH",str(selected))
+    backend=SenseVoiceBackend(SenseVoiceConfig(tmp_path/"model",tmp_path/"vad",sys.executable))
+    monkeypatch.setattr(backend,"health",lambda:BackendHealth("sensevoice",True,True,None))
+    monkeypatch.setattr(backend,"describe",lambda:ASRProvenance("sensevoice","fixture",None))
+    async def run(args,**kwargs):
+        child=subprocess.run([sys.executable,"-c","import asr_dependency; print(asr_dependency.identity)"],env=kwargs["env"],cwd=tmp_path,capture_output=True,text=True)
+        assert child.returncode==0,child.stderr
+        assert child.stdout.strip()=="selected"
+        Path(args[args.index("--output")+1]).write_text('{"engine":"fixture","segments":[]}')
+        return b""
+    monkeypatch.setattr(sensevoice,"run_process",run)
+    audio=tmp_path/"audio.flac"
+    audio.touch()
+    await backend.transcribe(ASRRequest(audio,2,tmp_path),on_progress=lambda p:None,cancelled=lambda:False)

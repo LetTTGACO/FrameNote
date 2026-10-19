@@ -88,7 +88,6 @@ class SenseVoiceBackend:
         raw_path = request.work_dir / "asr.raw.json"
         env = os.environ.copy()
         env["OMP_NUM_THREADS"] = str(self.config.threads)
-        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[2])
         def progress(line: str) -> None:
             try:
                 value = json.loads(line)
