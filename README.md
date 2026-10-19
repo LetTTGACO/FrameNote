@@ -64,6 +64,8 @@ my-note/
 
 B站保留 ?p=N，默认第1P；抖音先尝试平台下载，按配置启用 Galaxy 外部 API 回退；本地视频流式上传，上限默认2GiB。源视频保留在服务 workspace/tasks/TASK_ID/，可继续截图。SenseVoice 时间为 VAD 语音片段区间，章节边界按近似范围表达。
 
+Galaxy 外部 API 回退使用 [bhwa233/galaxy-downloader](https://github.com/bhwa233/galaxy-downloader) 项目的后端 API。抖音常规下载失败时，可通过 `FRAMENOTE_GALAXY_ENABLED=true` 启用回退，并使用 `FRAMENOTE_GALAXY_BASE_URL` 配置后端 API 基址。
+
 单 worker 串行转录，JSON 持久化与文件锁保证 workspace 独占。排队任务重启继续，处理中断标记 failed/interrupted并保留已落盘材料；取消等待进程组清理后再处理下一任务。
 
 ## 配置、扩展与开发
