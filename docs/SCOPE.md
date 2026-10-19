@@ -1,15 +1,11 @@
-# FrameNote 实施范围
+# FrameNote 当前范围
 
-来源：2026-10-20 用户确认的最小代码提取流程。
+FrameNote 提供 B站单视频/指定分 P、抖音与本地上传的材料服务，包含可配置的 Galaxy 抖音回退、SenseVoiceSmall ONNX INT8 + FSMN VAD、持久任务、独立截图、REST /api 与9个 MCP 工具。
 
-- 项目目录 `/Users/1874w/workspace/studio/FrameNote`，独立于实验仓库运行。
-- 支持B站单视频/单分P、抖音链接、本地视频上传。
-- Homelab常驻服务负责下载、SenseVoiceSmall转录、持久任务和独立抽帧。
-- 抖音原版下载失败时，按配置回退Galaxy外部API。
-- 同端口提供REST API和Streamable HTTP MCP，保留9个材料工具。
-- Codex通过Skill生成首次整理的阅读底稿，保留关键内容、章节时间、截图和原稿引用。
-- 笔记顶层为notes.md、chapters-transcript.md，其余材料归入materials/。
-- 验证三种输入、MCP原生图像、材料下载、输出链接和任务回查。
-- 保留旧实验目录与部署作对照；独立版本通过后创建GitHub仓库并切换部署。
+服务原生安装，默认一个 venv 并通过独立子进程推理，单 worker 串行任务与 JSON 存储。目标环境为 N100 Ubuntu x86_64/Python3.10 与 Apple Silicon macOS arm64/Python3.12。固定10文件模型锁与 prepare/verify 随包交付，文档覆盖安装、运行、升级与备份。
 
-代码组织：framenote/为服务与下载实现，skills/framenote/为Agent工作流，deploy/为systemd和配置示例，tests/为行为回归。
+ASRBackend 把具体模型检查/推理/raw映射封装在适配器中。开发者实现协议、配置解析与工厂分支后，可通过配置选择其后端；所有非空段落提供 start/end/text。
+
+Codex Skill 根据完整转录和实际截图生成两份阅读文档；笔记根目录为 notes.md、chapters-transcript.md、materials/。旧材料只读兼容，重取保留用户阅读文档和纠错记录。
+
+代码在 framenote/，项目工作流在 skills/framenote/，部署模板在 deploy/，行为与发行回归在 tests/。LICENSE/NOTICE 保留上游来源。
