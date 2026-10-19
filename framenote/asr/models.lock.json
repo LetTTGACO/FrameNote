@@ -1,0 +1,95 @@
+{
+  "schema_version": 1,
+  "files": [
+    {
+      "target": "sensevoice/am.mvn",
+      "repo": "iic/SenseVoiceSmall-onnx",
+      "revision": "4e95991ddb34c70e9b94f026d62ac82a9d941ae1",
+      "url": "https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/4e95991ddb34c70e9b94f026d62ac82a9d941ae1/am.mvn",
+      "bytes": 11203,
+      "sha256": "29b3c740a2c0cfc6b308126d31d7f265fa2be74f3bb095cd2f143ea970896ae5",
+      "license_url": "https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE"
+    },
+    {
+      "target": "sensevoice/config.yaml",
+      "repo": "iic/SenseVoiceSmall-onnx",
+      "revision": "4e95991ddb34c70e9b94f026d62ac82a9d941ae1",
+      "url": "https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/4e95991ddb34c70e9b94f026d62ac82a9d941ae1/config.yaml",
+      "bytes": 1855,
+      "sha256": "f71e239ba36705564b5bf2d2ffd07eece07b8e3f2bbf6d2c99d8df856339ac19",
+      "license_url": "https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE"
+    },
+    {
+      "target": "sensevoice/configuration.json",
+      "repo": "iic/SenseVoiceSmall-onnx",
+      "revision": "000ca612d24c796072270fdffb15b7f4e0f27926",
+      "url": "https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/000ca612d24c796072270fdffb15b7f4e0f27926/configuration.json",
+      "bytes": 56,
+      "sha256": "c57f6a580d63f7465c6a22ba95847aee05a1ae1181f5abddffb943d9febda061",
+      "license_url": "https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE"
+    },
+    {
+      "target": "sensevoice/model_quant.onnx",
+      "repo": "iic/SenseVoiceSmall-onnx",
+      "revision": "4e95991ddb34c70e9b94f026d62ac82a9d941ae1",
+      "url": "https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/4e95991ddb34c70e9b94f026d62ac82a9d941ae1/model_quant.onnx",
+      "bytes": 241216270,
+      "sha256": "21dc965f689a78d1604717bf561e40d5a236087c85a95584567835750549e822",
+      "license_url": "https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE"
+    },
+    {
+      "target": "sensevoice/tokens.json",
+      "repo": "iic/SenseVoiceSmall-onnx",
+      "revision": "4e95991ddb34c70e9b94f026d62ac82a9d941ae1",
+      "url": "https://modelscope.cn/models/iic/SenseVoiceSmall-onnx/resolve/4e95991ddb34c70e9b94f026d62ac82a9d941ae1/tokens.json",
+      "bytes": 352064,
+      "sha256": "a2594fc1474e78973149cba8cd1f603ebed8c39c7decb470631f66e70ce58e97",
+      "license_url": "https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE"
+    },
+    {
+      "target": "sensevoice/chn_jpn_yue_eng_ko_spectok.bpe.model",
+      "repo": "iic/SenseVoiceSmall",
+      "revision": "70514a3da51f1160f51d18449dab6128bbd4928b",
+      "url": "https://modelscope.cn/models/iic/SenseVoiceSmall/resolve/70514a3da51f1160f51d18449dab6128bbd4928b/chn_jpn_yue_eng_ko_spectok.bpe.model",
+      "bytes": 377341,
+      "sha256": "aa87f86064c3730d799ddf7af3c04659151102cba548bce325cf06ba4da4e6a8",
+      "license_url": "https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE"
+    },
+    {
+      "target": "vad/am.mvn",
+      "repo": "damo/speech_fsmn_vad_zh-cn-16k-common-onnx",
+      "revision": "9e08ccbfe15c79d0f4b41247c5ed4266031ac362",
+      "url": "https://modelscope.cn/models/damo/speech_fsmn_vad_zh-cn-16k-common-onnx/resolve/9e08ccbfe15c79d0f4b41247c5ed4266031ac362/am.mvn",
+      "bytes": 8040,
+      "sha256": "6820fef9687708c4fc3fab2530179c8fcea6262daa25514380056cd8f6eb1754",
+      "license_url": "https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE"
+    },
+    {
+      "target": "vad/config.yaml",
+      "repo": "damo/speech_fsmn_vad_zh-cn-16k-common-onnx",
+      "revision": "a158155ef9e81f405c052f40b6d1ad43b87e6215",
+      "url": "https://modelscope.cn/models/damo/speech_fsmn_vad_zh-cn-16k-common-onnx/resolve/a158155ef9e81f405c052f40b6d1ad43b87e6215/config.yaml",
+      "bytes": 1215,
+      "sha256": "2ef334f2d7776edd86ed696296774f87550206c256bfabc597872ad861831589",
+      "license_url": "https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE"
+    },
+    {
+      "target": "vad/configuration.json",
+      "repo": "damo/speech_fsmn_vad_zh-cn-16k-common-onnx",
+      "revision": "bdaa7c49489f31282c1c17a3b86e2c80e40f8d30",
+      "url": "https://modelscope.cn/models/damo/speech_fsmn_vad_zh-cn-16k-common-onnx/resolve/bdaa7c49489f31282c1c17a3b86e2c80e40f8d30/configuration.json",
+      "bytes": 598,
+      "sha256": "f62fcbcebbaade798714b34c521cad87d869ee6a327ceed948e01ff2336bbfc0",
+      "license_url": "https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE"
+    },
+    {
+      "target": "vad/model_quant.onnx",
+      "repo": "damo/speech_fsmn_vad_zh-cn-16k-common-onnx",
+      "revision": "f436483dfd1bf3eb1b410133ff86ecc9e10abc4a",
+      "url": "https://modelscope.cn/models/damo/speech_fsmn_vad_zh-cn-16k-common-onnx/resolve/f436483dfd1bf3eb1b410133ff86ecc9e10abc4a/model_quant.onnx",
+      "bytes": 506744,
+      "sha256": "5289eb2aa3c9af2d7a4284bcfa7c3ceb81d360814ed4203239b6c5d0569da8a1",
+      "license_url": "https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE"
+    }
+  ]
+}
