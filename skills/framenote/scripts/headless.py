@@ -18,6 +18,22 @@ import uuid
 ARTIFACTS = {"metadata.json", "transcript.json", "transcript.md", "transcript.srt", "asr.raw.json", "frames.json"}
 
 
+def check_version(payload: dict) -> None:
+    version = payload.get("schema_version", 1)
+    if type(version) is not int or version not in {1, 2}:
+        raise ValueError("Unsupported material schema version")
+
+
+def default_notes_dir() -> Path:
+    configured = os.getenv("FRAMENOTE_NOTES_DIR")
+    if configured:
+        return Path(configured).expanduser().resolve()
+    for root in Path(__file__).resolve().parents:
+        if (root / "pyproject.toml").is_file() and (root / "framenote/service.py").is_file():
+            return root / "workspace/notes"
+    return Path.cwd() / "framenote-notes"
+
+
 class Client:
     def __init__(self, base: str):
         self.base = base.rstrip("/")
@@ -76,26 +92,31 @@ class Client:
             temporary.unlink(missing_ok=True)
 
     def fetch(self, task_id: str, output: Path) -> dict:
-        output.mkdir(parents=True, exist_ok=True)
         materials = output / "materials"
         for directory in (output, materials):
             marker = directory / "bundle.json"
             if marker.exists():
-                if json.loads(marker.read_text())["task_id"] != task_id:
+                value = json.loads(marker.read_text())
+                check_version(value)
+                if value["task_id"] != task_id:
                     raise ValueError("材料目录属于其他任务，请使用另一个 --out-dir。")
             elif any((directory / name).exists() for name in ARTIFACTS):
                 raise ValueError("目录已有未标记任务身份的材料，请使用新的 --out-dir。")
         if (output / "bundle.json").exists():
             raise ValueError("目录仍使用旧版布局，请先将原始材料及截图整理到 materials/。")
+        task = self.request("GET", f"/api/task/{task_id}")
+        if task.get("task_id") != task_id:
+            raise ValueError("Service returned a different task")
+        manifest = self.request("GET", f"/api/task/{task_id}/artifacts")
+        check_version(manifest)
+        if manifest.get("task_id", task_id) != task_id:
+            raise ValueError("Artifact manifest belongs to a different task")
         materials.mkdir(parents=True, exist_ok=True)
         bundle_path = materials / "bundle.json"
-        task = self.request("GET", f"/api/task/{task_id}")
-        bundle = {"service_url": self.base, "task_id": task_id, "task": task, "directory": str(output.resolve()),
-                  "materials_directory": str(materials.resolve()),
+        bundle = {"schema_version": 2, "service_url": self.base, "task_id": task_id, "task": task,
+                  "directory": str(output.resolve()), "materials_directory": str(materials.resolve()),
                   "download_complete": False}
-        # Claim ownership before downloading so interrupted attempts remain identifiable.
         bundle_path.write_text(json.dumps(bundle, ensure_ascii=False, indent=2))
-        manifest = self.request("GET", f"/api/task/{task_id}/artifacts")
         for item in manifest["artifacts"]:
             name = item["name"]
             if name in ARTIFACTS:
@@ -116,7 +137,7 @@ class Client:
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--service-url", default=os.getenv("FRAMENOTE_SERVICE_URL", "http://192.168.31.56:18121"))
+    parser.add_argument("--service-url", default=os.getenv("FRAMENOTE_SERVICE_URL", "http://127.0.0.1:18121"))
     commands = parser.add_subparsers(dest="command", required=True)
     transcribe = commands.add_parser("transcribe")
     transcribe.add_argument("source", help="B站/抖音链接或Mac本地视频")
@@ -131,7 +152,11 @@ def main() -> None:
     fetch.add_argument("--out-dir", type=Path, required=True, help="笔记根目录；原始材料保存到其 materials/ 子目录")
     for name in ("status", "cancel"):
         commands.add_parser(name).add_argument("task_id")
+    commands.add_parser("notes-dir", help="显示 Skill 默认笔记根目录")
     args = parser.parse_args()
+    if args.command == "notes-dir":
+        print(json.dumps({"notes_directory": str(default_notes_dir())}, ensure_ascii=False))
+        return
     client = Client(args.service_url)
     if args.command == "transcribe":
         source = Path(args.source).expanduser()

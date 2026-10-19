@@ -17,25 +17,18 @@ from framenote.galaxy_downloader import GalaxyDownloader
 from framenote.service import Jobs, create_app
 from framenote.service_pipeline import Pipeline, platform_url
 from framenote.service_process import run_process
-from framenote.service_settings import Settings
+from framenote.service_settings import Settings, SenseVoiceConfig
 from framenote.task_store import TaskStore, atomic_json
 
 
 def config(tmp_path, **kwargs):
-    return Settings(workspace=tmp_path, sensevoice_model=tmp_path / "sense", vad_model=tmp_path / "vad", **kwargs)
+    return Settings(workspace=tmp_path, sensevoice=SenseVoiceConfig(tmp_path / "sense", tmp_path / "vad", sys.executable), **kwargs)
 
 
 def client_for(settings):
     return TestClient(create_app(settings), client=("192.168.31.42", 51000))
 
 
-@pytest.fixture
-def video(tmp_path):
-    target = tmp_path / "test.mp4"
-    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i", "testsrc2=duration=5:size=160x90:rate=25",
-                    "-f", "lavfi", "-i", "sine=frequency=440:duration=5", "-c:v", "libx264", "-g", "100",
-                    "-c:a", "aac", "-shortest", "-y", str(target)], check=True)
-    return target
 
 
 def finished_task(store, video=None):
@@ -293,3 +286,107 @@ async def test_cancel_reaps_descendant_that_ignores_term_after_leader_exits(tmp_
         if pid.exists():
             with __import__('contextlib').suppress(ProcessLookupError):
                 os.kill(int(pid.read_text()), signal.SIGKILL)
+
+
+@pytest.mark.parametrize("output_format",["json","markdown","srt"])
+def test_transcript_legacy_and_invalid_versions_preserve_files(tmp_path,output_format):
+    with client_for(config(tmp_path)) as client:
+        task_id=finished_task(client.app.state.store)
+        path=client.app.state.store.directory(task_id)/"transcript.json"
+        original=path.read_bytes()
+        assert client.get(f"/api/task/{task_id}/transcript",params={"output_format":output_format}).status_code==200
+        assert path.read_bytes()==original
+        for payload,code in [({"schema_version":99},"unsupported_material_version"),({"duration":5,"segments":[{"text":"missing"}]},"invalid_transcript")]:
+            path.write_text(json.dumps(payload))
+            before=path.read_bytes()
+            response=client.get(f"/api/task/{task_id}/transcript",params={"output_format":output_format})
+            assert response.status_code==409
+            assert response.json()["detail"]["code"]==code
+            assert path.read_bytes()==before
+
+
+def test_transcript_paging_formats_share_segments(tmp_path):
+    with client_for(config(tmp_path)) as client:
+        task_id=finished_task(client.app.state.store)
+        pages=[]
+        for output_format in ["json","markdown","srt"]:
+            response=client.get(f"/api/task/{task_id}/transcript",params={"offset":1,"limit":2,"output_format":output_format})
+            assert response.status_code==200
+            payload=response.json()
+            assert [s["text"] for s in payload["segments"]]==["段落1","段落2"]
+            pages.append(payload["segments"])
+            if output_format!="json":
+                assert "段落1" in payload["content"] and "段落3" not in payload["content"]
+        assert pages[0]==pages[1]==pages[2]
+        assert client.get(f"/api/task/{task_id}/transcript?limit=501").status_code==422
+        assert client.get(f"/api/task/{task_id}/transcript?start=-1").status_code==422
+        assert client.get(f"/api/task/{task_id}/transcript?start=4&end=2").status_code==422
+
+
+@pytest.mark.parametrize("output_format", ["json", "markdown", "srt"])
+@pytest.mark.parametrize("selection,expected", [
+    ({"offset": 1, "limit": 1}, ["段落1"]),
+    ({"start": 1, "end": 2}, ["段落1"]),
+    ({"offset": 5}, []),
+])
+def test_transcript_response_text_matches_selected_page(tmp_path, output_format, selection, expected):
+    with client_for(config(tmp_path)) as client:
+        task_id = finished_task(client.app.state.store)
+        path = client.app.state.store.directory(task_id) / "transcript.json"
+        original = path.read_bytes()
+        response = client.get(f"/api/task/{task_id}/transcript", params={**selection, "output_format": output_format})
+        assert response.status_code == 200
+        page = response.json()
+        assert [segment["text"] for segment in page["segments"]] == expected
+        assert page["text"] == "\n".join(expected)
+        if output_format != "json":
+            assert all(text not in page["content"] for text in ["段落0", "段落2", "段落3", "段落4"])
+        assert path.read_bytes() == original
+
+
+@pytest.mark.asyncio
+async def test_stop_during_cancellation_waits_for_term_resistant_child(tmp_path):
+    import os
+    import signal
+    from contextlib import suppress
+
+    store = TaskStore(tmp_path / "tasks")
+    task_id = store.create()["task_id"]
+    ready = asyncio.Event()
+    term_received = tmp_path / "term-received"
+    child_pid = None
+
+    def progress(line):
+        nonlocal child_pid
+        child_pid = int(line)
+        ready.set()
+
+    child_code = (
+        "import os,pathlib,signal,sys,time; "
+        "signal.signal(signal.SIGTERM, lambda *args: pathlib.Path(sys.argv[1]).write_text('term')); "
+        "print(os.getpid(),flush=True); time.sleep(60)"
+    )
+
+    class Runner:
+        async def run(self, task_id, aborted):
+            await run_process([sys.executable, "-u", "-c", child_code, str(term_received)], progress=progress)
+
+    jobs = Jobs(store, Runner())
+    await jobs.start()
+    try:
+        jobs.enqueue(task_id)
+        await asyncio.wait_for(ready.wait(), 5)
+        jobs.cancel(task_id)
+        for _ in range(200):
+            if term_received.exists():
+                break
+            await asyncio.sleep(.01)
+        assert term_received.exists(), "First cancellation must enter TERM cleanup before stop"
+        await asyncio.wait_for(jobs.stop(), 10)
+        with pytest.raises(ProcessLookupError):
+            os.kill(child_pid, 0)
+    finally:
+        if child_pid is not None:
+            with suppress(ProcessLookupError):
+                os.killpg(child_pid, signal.SIGKILL)
+        await jobs.stop()

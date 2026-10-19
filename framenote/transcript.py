@@ -1,6 +1,12 @@
 from __future__ import annotations
 from dataclasses import asdict, dataclass
-from typing import Sequence
+from typing import Literal, Sequence, TypeAlias, cast
+import json
+import math
+from pathlib import Path
+
+JSONValue: TypeAlias = bool | int | float | str | None | list["JSONValue"] | dict[str, "JSONValue"]
+
 
 @dataclass(frozen=True)
 class TranscriptSegment:
@@ -10,6 +16,69 @@ class TranscriptSegment:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+class MaterialError(ValueError):
+    def __init__(self, code: Literal["unsupported_material_version", "invalid_transcript"], message: str):
+        super().__init__(message)
+        self.code = code
+
+
+def finite_number(value: object) -> bool:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def validate_segments(segments: Sequence[TranscriptSegment], *, duration: float) -> None:
+    if not finite_number(duration) or duration <= 0:
+        raise ValueError("duration must be positive and finite")
+    previous = -1.0
+    for index, segment in enumerate(segments):
+        try:
+            start, end, text = segment.start, segment.end, segment.text
+        except AttributeError as error:
+            raise ValueError(f"Segment {index} requires start/end/text") from error
+        if not finite_number(start) or not finite_number(end):
+            raise ValueError(f"Segment {index} times must be finite numbers")
+        if start < 0 or start < previous or start >= min(end, duration):
+            raise ValueError(f"Segment {index} has invalid or unordered interval")
+        if end > duration + .1 and not math.isclose(end, duration + .1, rel_tol=0, abs_tol=1e-9):
+            raise ValueError(f"Segment {index} exceeds duration")
+        if not isinstance(text, str):
+            raise ValueError(f"Segment {index} text must be a string")
+        previous = start
+
+
+def read_transcript(path: Path) -> dict[str, JSONValue]:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("Transcript must be an object")
+        version = payload.get("schema_version", 1)
+        if type(version) is not int or version not in {1, 2}:
+            raise MaterialError("unsupported_material_version", "Unsupported transcript schema version")
+        items = payload["segments"]
+        if not isinstance(items, list):
+            raise ValueError("segments must be an array")
+        segments = [TranscriptSegment(item["start"], item["end"], item["text"]) for item in items]
+        duration = payload["duration"]
+        validate_segments(segments, duration=duration)
+        payload["segments"] = [{"start": segment.start, "end": min(segment.end, duration), "text": segment.text} for segment in segments]
+        payload.setdefault("text", "\n".join(segment.text for segment in segments))
+        payload.setdefault("provenance", {"backend": "legacy_unknown", "model": payload.get("engine", "legacy_unknown"),
+                                          "revision": None, "parameters": {}, "artifacts": {}, "versions": {}})
+        payload.setdefault("metrics", {})
+        payload.setdefault("warnings", [] if segments else ["no_speech_detected"])
+        return cast(dict[str, JSONValue], payload)
+    except MaterialError:
+        raise
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as error:
+        raise MaterialError("invalid_transcript", "Invalid transcript: " + str(error)) from error
+
 
 def format_timestamp(seconds: float) -> str:
     total_seconds = max(0, int(seconds))

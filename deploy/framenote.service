@@ -1,16 +1,21 @@
 [Unit]
-Description=FrameNote headless media and SenseVoice service
+Description=FrameNote video materials service
 After=network-online.target
 Wants=network-online.target
 
 [Service]
 Type=simple
-WorkingDirectory=/root/labs/FrameNote
-EnvironmentFile=/root/labs/FrameNote/service.env
-ExecStart=/root/labs/FrameNote/.venv/bin/python -m uvicorn framenote.service:app --host 0.0.0.0 --port 18121 --workers 1 --no-proxy-headers
+User=framenote
+Group=framenote
+WorkingDirectory=/opt/framenote
+EnvironmentFile=/etc/framenote/service.env
+Environment=FRAMENOTE_WORKSPACE=/var/lib/framenote
+ExecStart=/opt/framenote/.venv/bin/python -m uvicorn framenote.service:app --host 0.0.0.0 --port 18121 --workers 1 --no-proxy-headers
+StateDirectory=framenote
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
+KillMode=mixed
 Nice=5
 UMask=0077
 NoNewPrivileges=true
