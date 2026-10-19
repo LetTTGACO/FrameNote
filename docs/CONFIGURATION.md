@@ -41,7 +41,7 @@ python3 -S skills/framenote/scripts/headless.py notes-dir
 python3 -S skills/framenote/scripts/headless.py --service-url http://127.0.0.1:18121 fetch TASK_ID --out-dir ./my-note
 ```
 
-仓库提供项目级 .codex/config.toml 与 .agents/skills/framenote 相对链接。远程使用者将配置中的 url 改为实际地址，例如 http://SERVER:18121/mcp。挂载式 MCP 直接使用本服务，端口变化无需额外配置内部回调 URL。stdio MCP 通过 FRAMENOTE_SERVICE_URL 指向服务：
+项目级 `.codex/config.toml` 在本地创建并由 Git 忽略，配置示例见 README；仓库提供 .agents/skills/framenote 相对链接。远程使用者将配置中的 url 改为实际地址，例如 http://SERVER:18121/mcp。挂载式 MCP 直接使用本服务，端口变化无需额外配置内部回调 URL。stdio MCP 通过 FRAMENOTE_SERVICE_URL 指向服务：
 
 ```bash
 FRAMENOTE_SERVICE_URL=http://127.0.0.1:18121 python -m framenote.service_mcp

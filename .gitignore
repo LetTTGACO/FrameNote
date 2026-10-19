@@ -11,4 +11,5 @@ dist/
 workspace/
 models/
 service.env
+.codex/config.toml
 .DS_Store

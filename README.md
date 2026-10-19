@@ -25,7 +25,14 @@ python -m uvicorn framenote.service:app --host 127.0.0.1 --port 18121 --workers 
 
 ## 接入 MCP 与 Skill
 
-项目 .codex/config.toml 示例为 `http://127.0.0.1:18121/mcp`，协议为 Streamable HTTP；远程使用时替换为客户端可达地址。仓库 .agents/skills/framenote 链接项目 [Skill](skills/framenote/SKILL.md)。从源码归档安装时，可建立同样入口：
+在本地创建 `.codex/config.toml`，配置 Streamable HTTP 服务地址；远程使用时替换为客户端可达地址：
+
+```toml
+[mcp_servers.framenote]
+url = "http://127.0.0.1:18121/mcp"
+```
+
+该文件由 Git 忽略，用于保存本机配置。仓库 .agents/skills/framenote 链接项目 [Skill](skills/framenote/SKILL.md)。从源码归档安装时，可建立同样入口：
 
 ```bash
 mkdir -p .agents/skills
