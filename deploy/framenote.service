@@ -15,6 +15,7 @@ StateDirectory=framenote
 Restart=on-failure
 RestartSec=5
 TimeoutStopSec=30
+KillMode=mixed
 Nice=5
 UMask=0077
 NoNewPrivileges=true

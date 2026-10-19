@@ -124,3 +124,5 @@ unit 显式使用 User/Group、工作目录、环境文件、venv Python、0.0.0
 | 本地材料被拒绝覆盖 | 使用该 task_id 原目录，或为新任务指定独立 --out-dir |
 
 /API 活性、ready、真实推理和阅读验收分别记录；真实两平台结果不由 CI 单元测试替代。
+
+unit 使用 `KillMode=mixed`：停止时先向服务主进程发送 SIGTERM，让队列停止并清理推理子进程；超过 `TimeoutStopSec=30` 后，systemd 才强制清理整个控制组。默认的 `control-group` 会先终止推理进程，可能将正常停机误报为 ASR 失败，并提前启动队列下一项。
