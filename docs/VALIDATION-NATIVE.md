@@ -15,7 +15,7 @@
 | models prepare / verify | 公共固定来源独立下载，10/10 通过 | 公共固定来源独立下载，10/10 通过 |
 | ready | 200，configured/available=true | 200，configured/available=true |
 
-实际安装的 wheel SHA-256：`9e0aa84a4e999849cc81c75f843048e40eeddb856cbf8f28b522c6968948b0e8`，对应运行代码提交 `6e4b193`。之后的部署模板修正只改变 systemd 关停配置，候选 unit 同步修正；未更改该 wheel 中的 Python 运行代码。
+首次安装及上表三渠道初验使用的 wheel SHA-256：`9e0aa84a4e999849cc81c75f843048e40eeddb856cbf8f28b522c6968948b0e8`，对应运行代码提交 `6e4b193`。之后的部署模板修正只改变 systemd 关停配置，候选 unit 同步修正；未更改该 wheel 中的 Python 运行代码。
 
 两机均为 funasr-onnx 0.4.3、onnxruntime 1.23.2、numpy 1.26.4、soundfile 0.14.0。模型来源与固定修订见 [MODELS.md](MODELS.md)；SenseVoice、BPE、VAD 主文件的 SHA-256 分别为：
 
@@ -74,10 +74,25 @@ B站来源：[BV1dK411K7Fe，第 3 P](https://www.bilibili.com/video/BV1dK411K7F
 
 ## 回归与证据
 
-- 完整 pytest：133 passed，2 个可选发行包测试默认 skipped；保留一个既有 Starlette TestClient 弃用警告。
+- 完整 pytest：144 passed，2 个可选发行包测试默认 skipped；保留一个既有 Starlette TestClient 弃用警告。
 - mypy：18 个运行模块通过。
 - 可选发行包检查：独立运行 2 passed；检查 wheel/sdist 内容与源码目录外安装。wheel/sdist 构建成功。
 - Ubuntu systemd-analyze verify 退出 0；系统中已有的其他 unit 警告单独记录。
 - GitHub Actions 已配置 Ubuntu Python 3.10/3.12 回归与发行物检查；本轮没有推送，尚未获得云端 CI 运行结果。
 
 完整私有证据保存在本机 `workspace/validation-native/2026-10-20/`，包括 native-validation.json、两机 environment.txt、prepare/install 日志、native-lifecycle.json、native-frames.json、long-pagination.json、native-reading-check.json、native-legacy-check.json 和回归输出。任务原始文件分别保存在各自候选 workspace；阅读材料保存在上面的笔记目录。上述目录被 Git 忽略，公开记录不包含环境凭据或用户媒体文件。
+
+## 独立审查后的最终复验
+
+一次全新上下文整分支审查提出 3 项 Important、0 项 Critical、0 项 Minor。逐项复现后在一次修复中完成：分页响应的 text 按当前页生成；兼容 Python 3.10 的 asyncio 超时类型并保留 asr_timeout；子进程清理使用独立受保护的回收任务，重复取消时继续等待 TERM/KILL 与 wait 完成。真实 TERM 抵抗子进程覆盖“先取消、清理中再停服”的重叠时序。
+
+新增 11 个回归用例后，完整套件为 144 passed，2 个可选发行物检查单独通过，mypy 18 模块通过。Python 3.10 的真实 asyncio.wait_for 回归在修复前失败；最终 wheel 安装后，N100 从源码目录外运行全部 service/adapter 针对性测试：41 passed。额外测试依赖是在干净安装初验之后加入 N100 候选 venv 的，不属于运行时依赖要求。
+
+最终运行代码提交：`2c14ea6`；最终 wheel SHA-256：`40f92fae760583939ad40bdca6852c809b2cbc6c48ba9a80bff44566d7e99ae8`。两机均 force-reinstall 同一最终 wheel、pip check 通过，并只重启各自 18122 候选服务。最终本地真实转录：
+
+| 平台 | task_id | 段数 | 准备 / ASR / 总计（秒） |
+| --- | --- | ---: | --- |
+| Mac | `e4f9d119e0b947989e41f51aca85ffb1` | 1 | 0.118 / 1.744 / 1.990 |
+| N100 | `70867954728c48c2ad8aa928d3e18a62` | 1 | 0.212 / 5.339 / 5.712 |
+
+通过 N100 /mcp 回读既有新长视频，offset/limit、时间筛选和空页的 text 均等于所选 segments 的拼接；原始下载文件继续保留全文。长视频阅读稿与人工验收结论继续有效，未修改阅读稿内容。最终重新执行取消、正常停机/重启、强杀恢复、工作目录锁及生产健康检查，结果见 final-lifecycle.log 与 native-lifecycle.json；final-native-retest.json、final-py310-green.log 保存最终 wheel 和机器证据。初验记录与最终复验分别保留，云端 CI 状态仍为未执行。
