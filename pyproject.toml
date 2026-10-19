@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "framenote"
+version = "0.1.0"
+description = "Headless video materials and chapter-note workflow for agents"
+requires-python = ">=3.10"
+license = "MIT"
+dependencies = [
+  "fastapi>=0.115,<1", "uvicorn>=0.30,<1", "python-multipart>=0.0.18,<1",
+  "yt-dlp>=2026.7.4", "av>=13,<17", "Pillow>=10,<13", "httpx>=0.28,<1", "mcp>=1.20,<2",
+]
+
+[project.optional-dependencies]
+asr = ["funasr-onnx==0.4.3", "onnxruntime==1.23.2", "numpy==1.26.4", "soundfile==0.14.0"]
+dev = ["pytest>=8,<10", "pytest-asyncio>=0.24,<2", "mypy>=1.15,<2"]
+
+[tool.setuptools.packages.find]
+include = ["framenote*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["tests"]
+
+[tool.mypy]
+ignore_missing_imports = true
+follow_imports = "silent"

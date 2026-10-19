@@ -1,0 +1,137 @@
+"""Acquire and retain media, normalize audio, then run the isolated ASR worker."""
+from __future__ import annotations
+
+import asyncio
+import json
+import os
+from pathlib import Path
+import sys
+import time
+from typing import Callable
+from urllib.parse import urlsplit
+
+from .galaxy_downloader import GalaxyDownloader
+from .service_process import run_process
+from .service_settings import Settings
+from .task_store import TaskStore, atomic_json, public_error
+from .transcript import TranscriptSegment, segments_to_prompt, segments_to_srt
+from .acquisition import MediaDownloader, MediaSource, bilibili_page_url, normalize_video_input
+
+
+def platform_url(value: str) -> str:
+    url = normalize_video_input(value)
+    if not url:
+        raise ValueError("请提供B站或抖音视频链接；本地视频请先上传。")
+    parsed = urlsplit(url)
+    source = MediaDownloader.detect_source(url)
+    if source not in {MediaSource.BILIBILI, MediaSource.DOUYIN} or parsed.username or parsed.port not in {None, 80, 443}:
+        raise ValueError("仅接受B站和抖音平台链接。")
+    if source == MediaSource.BILIBILI and parsed.hostname != "b23.tv" and "p=" not in parsed.query:
+        url = bilibili_page_url(url, 1)
+    return url
+
+
+async def probe_media(path: Path) -> dict:
+    raw = await run_process(["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)], timeout=30)
+    return json.loads(raw)
+
+
+class Pipeline:
+    def __init__(self, settings: Settings, store: TaskStore):
+        self.settings, self.store = settings, store
+
+    async def acquire_upstream(self, task_id: str, url: str) -> tuple[Path, Path, dict]:
+        directory = self.store.directory(task_id)
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        await run_process([sys.executable, "-m", "framenote.service_acquire", "--root", str(self.store.root),
+                           "--task-id", task_id, "--url", url], timeout=self.settings.process_timeout,
+                          log=directory / "acquisition.log", env=env)
+        result = json.loads((directory / "acquisition.json").read_text())
+        for note in result["notes"]:
+            self.store.log(task_id, public_error(RuntimeError(note)))
+        return directory / result["video"], directory / result["audio"], result["metadata"]
+
+    async def acquire(self, task_id: str, aborted: Callable[[], bool]) -> tuple[Path, Path, dict]:
+        task = self.store.get(task_id)
+        directory = self.store.directory(task_id)
+        if task.get("upload_name"):
+            path = directory / task["upload_name"]
+            return path, path, {"title": task["title"], "source": "local", "acquisition_provider": "upload"}
+        url = task["video_url"]
+        source = MediaDownloader.detect_source(url)
+        try:
+            return await self.acquire_upstream(task_id, url)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:
+            if source != MediaSource.DOUYIN or not self.settings.galaxy_enabled:
+                raise
+            self.store.log(task_id, "原版抖音获取失败，使用Galaxy API：" + public_error(error))
+            self.store.update(task_id, phase="galaxy_download")
+            video, info = await GalaxyDownloader(self.settings.galaxy_base_url).download(url, directory)
+            return video, video, info
+
+    async def run(self, task_id: str, aborted: Callable[[], bool]) -> None:
+        directory = self.store.directory(task_id)
+        started = time.perf_counter()
+        self.store.update(task_id, phase="acquisition", progress=5)
+        video, audio_source, info = await self.acquire(task_id, aborted)
+        probe = await probe_media(video)
+        if not any(s.get("codec_type") == "video" for s in probe.get("streams", [])):
+            raise RuntimeError("输入没有视频轨道")
+        duration = float(probe["format"].get("duration") or 0)
+        if duration <= 0:
+            raise RuntimeError("无法读取有效视频时长")
+        atomic_json(directory / "metadata.json", {**info, "duration": duration, "streams": probe["streams"]})
+        self.store.update(task_id, title=info.get("title") or "视频", duration=duration,
+                          acquisition_provider=info.get("acquisition_provider"),
+                          assets={"video": video.name}, phase="audio", progress=20)
+        audio = directory / "audio.flac"
+        pending = directory / "audio.pending.flac"
+        await run_process(["ffmpeg", "-nostdin", "-v", "error", "-xerror", "-i", str(audio_source),
+                           "-map", "0:a:0", "-ac", "1", "-ar", "16000", "-c:a", "flac", "-frame_size", "4096",
+                           "-y", str(pending)], timeout=self.settings.process_timeout, log=directory / "audio.log")
+        pending.replace(audio)
+        audio_probe = await probe_media(audio)
+        audio_duration = float(audio_probe["format"]["duration"])
+        if abs(audio_duration - duration) > max(3, duration * .01):
+            raise RuntimeError("下载音轨与视频时长不一致，已保留材料供检查")
+        preparation_seconds = time.perf_counter() - started
+        self.store.update(task_id, assets={"video": video.name, "audio": audio.name}, phase="asr", progress=30)
+        for label, model in (("SenseVoiceSmall", self.settings.sensevoice_model), ("FSMN VAD", self.settings.vad_model)):
+            if not (model / "model_quant.onnx").is_file():
+                raise RuntimeError(f"{label} model_quant.onnx 未找到：{model}")
+
+        def progress(line: str) -> None:
+            try:
+                value = json.loads(line)
+                completed, total = value["completed"], max(1, value["total"])
+                self.store.update(task_id, progress=30 + int(65 * completed / total),
+                                  asr_segments={"completed": completed, "total": total})
+            except (ValueError, KeyError, TypeError):
+                pass
+
+        raw_path = directory / "asr.raw.json"
+        env = os.environ.copy()
+        env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        env["OMP_NUM_THREADS"] = str(self.settings.threads)
+        await run_process([
+            self.settings.asr_python, "-u", "-m", "framenote.asr_sensevoice", "--audio", str(audio),
+            "--output", str(raw_path), "--model", str(self.settings.sensevoice_model),
+            "--vad", str(self.settings.vad_model), "--threads", str(self.settings.threads),
+        ], timeout=self.settings.process_timeout, log=directory / "asr.log", progress=progress, env=env)
+        raw = json.loads(raw_path.read_text())
+        segments = [TranscriptSegment(**item) for item in raw["segments"]]
+        payload = {"engine": raw["engine"], "timestamp_kind": "VAD_interval", "duration": audio_duration,
+                   "segments": [s.to_dict() for s in segments],
+                   "warnings": [] if segments else ["no_speech_detected"]}
+        atomic_json(directory / "transcript.json", payload)
+        (directory / "transcript.md").write_text(
+            "# 未人工校对的转录原稿\n\n时间范围来自VAD语音片段，非词级时间戳。\n\n" + segments_to_prompt(segments) + "\n", encoding="utf-8")
+        (directory / "transcript.srt").write_text(segments_to_srt(segments), encoding="utf-8", newline="")
+        self.store.update(task_id, status="completed", phase="completed", progress=100,
+                          result={"output": "transcript", "segment_count": len(segments), "timestamp_kind": "VAD_interval",
+                                  "preparation_seconds": round(preparation_seconds, 3),
+                                  "asr_seconds": raw["transcribe_seconds"], "model_load_seconds": raw["load_seconds"],
+                                  "total_seconds": round(time.perf_counter() - started, 3)})

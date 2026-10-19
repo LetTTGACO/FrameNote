@@ -1,0 +1,10 @@
+FrameNote
+
+Derived from like-attract/video-to-note, upstream commit
+868dcc377d7cb2a6ee088f7913874bc90d3708cf (v1.4.6), MIT License.
+https://github.com/like-attract/video-to-note
+
+Retained and adapted: Bilibili/Douyin media acquisition, transcript rendering.
+The independent headless service, task store, SenseVoice worker, frame extraction,
+MCP tools and agent workflow were developed in the local video-to-note experiment.
+The original copyright and license are retained in LICENSE.
