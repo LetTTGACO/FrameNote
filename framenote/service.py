@@ -159,7 +159,8 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
         selected = [s for s in cast(list[dict[str, Any]], payload["segments"]) if s["end"] > start and (end is None or s["start"] < end)]
         page = selected[offset:offset + limit]
         result: dict[str, Any] = {key: value for key, value in payload.items() if key != "segments"}
-        result.update(total_segments=len(selected), offset=offset, limit=limit, segments=page)
+        result.update(total_segments=len(selected), offset=offset, limit=limit, segments=page,
+                      text="\n".join(segment["text"] for segment in page))
         if output_format != "json":
             objects = [TranscriptSegment(**s) for s in page]
             result["content"] = segments_to_prompt(objects) if output_format == "markdown" else segments_to_srt(objects)

@@ -141,3 +141,16 @@ async def test_installed_backend_preserves_selected_python_search_path(tmp_path,
     audio=tmp_path/"audio.flac"
     audio.touch()
     await backend.transcribe(ASRRequest(audio,2,tmp_path),on_progress=lambda p:None,cancelled=lambda:False)
+
+
+@pytest.mark.asyncio
+async def test_actual_async_wait_timeout_keeps_stable_code(backend, tmp_path, monkeypatch):
+    async def run(*args, **kwargs):
+        return await asyncio.wait_for(asyncio.sleep(60), timeout=.001)
+
+    monkeypatch.setattr("framenote.asr.sensevoice.run_process", run)
+    audio = tmp_path / "audio.flac"
+    audio.touch()
+    with pytest.raises(ASRError) as error:
+        await backend.transcribe(ASRRequest(audio, 2, tmp_path), on_progress=lambda p: None, cancelled=lambda: False)
+    assert error.value.code == "asr_timeout"

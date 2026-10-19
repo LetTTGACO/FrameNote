@@ -41,19 +41,32 @@ async def run_process(args: list[str], *, timeout: float = 7200,
         try:
             return await asyncio.wait_for(consume(), timeout=timeout)
         finally:
-            # A leader can exit before descendants; stop the whole owned group.
-            def signal_group(value: int) -> bool:
-                try:
-                    os.killpg(process.pid, value)
-                    return True
-                except ProcessLookupError:
-                    return False
+            async def cleanup() -> None:
+                # A leader can exit before descendants; stop the whole owned group.
+                def signal_group(value: int) -> bool:
+                    try:
+                        os.killpg(process.pid, value)
+                        return True
+                    except ProcessLookupError:
+                        return False
 
-            alive = signal_group(signal.SIGTERM)
-            deadline = asyncio.get_running_loop().time() + 3
-            while alive and asyncio.get_running_loop().time() < deadline:
-                await asyncio.sleep(.05)
-                alive = signal_group(0)
-            if alive:
-                signal_group(signal.SIGKILL)
-            await process.wait()
+                alive = signal_group(signal.SIGTERM)
+                deadline = asyncio.get_running_loop().time() + 3
+                while alive and asyncio.get_running_loop().time() < deadline:
+                    await asyncio.sleep(.05)
+                    alive = signal_group(0)
+                if alive:
+                    signal_group(signal.SIGKILL)
+                await process.wait()
+
+            reaper = asyncio.create_task(cleanup())
+            interrupted = False
+            # Keep waiting after repeated cancellation; shield alone would return early.
+            while not reaper.done():
+                try:
+                    await asyncio.shield(reaper)
+                except asyncio.CancelledError:
+                    interrupted = True
+            reaper.result()
+            if interrupted:
+                raise asyncio.CancelledError

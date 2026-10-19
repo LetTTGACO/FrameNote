@@ -321,3 +321,72 @@ def test_transcript_paging_formats_share_segments(tmp_path):
         assert client.get(f"/api/task/{task_id}/transcript?limit=501").status_code==422
         assert client.get(f"/api/task/{task_id}/transcript?start=-1").status_code==422
         assert client.get(f"/api/task/{task_id}/transcript?start=4&end=2").status_code==422
+
+
+@pytest.mark.parametrize("output_format", ["json", "markdown", "srt"])
+@pytest.mark.parametrize("selection,expected", [
+    ({"offset": 1, "limit": 1}, ["段落1"]),
+    ({"start": 1, "end": 2}, ["段落1"]),
+    ({"offset": 5}, []),
+])
+def test_transcript_response_text_matches_selected_page(tmp_path, output_format, selection, expected):
+    with client_for(config(tmp_path)) as client:
+        task_id = finished_task(client.app.state.store)
+        path = client.app.state.store.directory(task_id) / "transcript.json"
+        original = path.read_bytes()
+        response = client.get(f"/api/task/{task_id}/transcript", params={**selection, "output_format": output_format})
+        assert response.status_code == 200
+        page = response.json()
+        assert [segment["text"] for segment in page["segments"]] == expected
+        assert page["text"] == "\n".join(expected)
+        if output_format != "json":
+            assert all(text not in page["content"] for text in ["段落0", "段落2", "段落3", "段落4"])
+        assert path.read_bytes() == original
+
+
+@pytest.mark.asyncio
+async def test_stop_during_cancellation_waits_for_term_resistant_child(tmp_path):
+    import os
+    import signal
+    from contextlib import suppress
+
+    store = TaskStore(tmp_path / "tasks")
+    task_id = store.create()["task_id"]
+    ready = asyncio.Event()
+    term_received = tmp_path / "term-received"
+    child_pid = None
+
+    def progress(line):
+        nonlocal child_pid
+        child_pid = int(line)
+        ready.set()
+
+    child_code = (
+        "import os,pathlib,signal,sys,time; "
+        "signal.signal(signal.SIGTERM, lambda *args: pathlib.Path(sys.argv[1]).write_text('term')); "
+        "print(os.getpid(),flush=True); time.sleep(60)"
+    )
+
+    class Runner:
+        async def run(self, task_id, aborted):
+            await run_process([sys.executable, "-u", "-c", child_code, str(term_received)], progress=progress)
+
+    jobs = Jobs(store, Runner())
+    await jobs.start()
+    try:
+        jobs.enqueue(task_id)
+        await asyncio.wait_for(ready.wait(), 5)
+        jobs.cancel(task_id)
+        for _ in range(200):
+            if term_received.exists():
+                break
+            await asyncio.sleep(.01)
+        assert term_received.exists(), "First cancellation must enter TERM cleanup before stop"
+        await asyncio.wait_for(jobs.stop(), 10)
+        with pytest.raises(ProcessLookupError):
+            os.kill(child_pid, 0)
+    finally:
+        if child_pid is not None:
+            with suppress(ProcessLookupError):
+                os.killpg(child_pid, signal.SIGKILL)
+        await jobs.stop()

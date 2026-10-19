@@ -103,7 +103,7 @@ class SenseVoiceBackend:
             ], timeout=self.config.timeout_seconds, log=request.work_dir / "asr.log", progress=progress, env=env)
         except asyncio.CancelledError:
             raise
-        except TimeoutError as error:
+        except (asyncio.TimeoutError, TimeoutError) as error:
             raise ASRError("asr_timeout", "SenseVoice inference timed out") from error
         except OSError as error:
             raise ASRError("asr_unavailable", "Cannot execute ASR Python") from error
