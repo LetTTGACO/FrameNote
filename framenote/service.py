@@ -8,7 +8,7 @@ import fcntl
 import json
 import math
 from pathlib import Path
-from typing import Literal
+from typing import Any, Literal, cast
 import uuid
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
@@ -21,7 +21,7 @@ from .service_pipeline import Pipeline, platform_url
 from .service_settings import Settings
 from .jobs import Jobs
 from .task_store import TERMINAL, TaskStore, atomic_json, public_error
-from .transcript import TranscriptSegment, segments_to_prompt, segments_to_srt
+from .transcript import MaterialError, TranscriptSegment, read_transcript, segments_to_prompt, segments_to_srt
 
 ARTIFACT_NAMES = {"metadata.json", "transcript.json", "transcript.md", "transcript.srt", "asr.raw.json", "frames.json"}
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".mpeg", ".mpg", ".ts"}
@@ -52,8 +52,6 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
     backend = runtime_pipeline.backend
     jobs = Jobs(store, runtime_pipeline)
     frame_locks: dict[str, asyncio.Lock] = {}
-    remote_mcp = create_mcp()
-    mcp_app = remote_mcp.streamable_http_app()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -71,11 +69,17 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
                 await jobs.stop()
 
     app = FastAPI(title="FrameNote", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    remote_mcp = create_mcp(app=app)
+    mcp_app = remote_mcp.streamable_http_app()
     app.state.store, app.state.jobs, app.state.backend = store, jobs, backend
 
     @app.exception_handler(KeyError)
     async def not_found(request: Request, error: KeyError):
         return JSONResponse({"detail": str(error)}, status_code=404)
+
+    @app.exception_handler(MaterialError)
+    async def material_error(request: Request, error: MaterialError):
+        return JSONResponse({"detail": {"code": error.code, "message": str(error)}}, status_code=409)
 
     @app.get("/api/health")
     async def health():
@@ -151,10 +155,10 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
             raise HTTPException(409, "Transcript is not ready")
         if end is not None and end < start:
             raise HTTPException(422, "end must be >= start")
-        payload = json.loads(path.read_text())
-        selected = [s for s in payload["segments"] if s["end"] > start and (end is None or s["start"] < end)]
+        payload = read_transcript(path)
+        selected = [s for s in cast(list[dict[str, Any]], payload["segments"]) if s["end"] > start and (end is None or s["start"] < end)]
         page = selected[offset:offset + limit]
-        result = {key: value for key, value in payload.items() if key != "segments"}
+        result: dict[str, Any] = {key: value for key, value in payload.items() if key != "segments"}
         result.update(total_segments=len(selected), offset=offset, limit=limit, segments=page)
         if output_format != "json":
             objects = [TranscriptSegment(**s) for s in page]
@@ -200,7 +204,7 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
     async def artifacts(task_id: str):
         store.get(task_id)
         directory = store.directory(task_id)
-        return {"artifacts": [{"name": name, "bytes": (directory / name).stat().st_size,
+        return {"schema_version": 2, "task_id": task_id, "artifacts": [{"name": name, "bytes": (directory / name).stat().st_size,
                                 "url": f"/api/task/{task_id}/artifacts/{name}"}
                                for name in sorted(ARTIFACT_NAMES) if (directory / name).is_file()]}
 

@@ -286,3 +286,38 @@ async def test_cancel_reaps_descendant_that_ignores_term_after_leader_exits(tmp_
         if pid.exists():
             with __import__('contextlib').suppress(ProcessLookupError):
                 os.kill(int(pid.read_text()), signal.SIGKILL)
+
+
+@pytest.mark.parametrize("output_format",["json","markdown","srt"])
+def test_transcript_legacy_and_invalid_versions_preserve_files(tmp_path,output_format):
+    with client_for(config(tmp_path)) as client:
+        task_id=finished_task(client.app.state.store)
+        path=client.app.state.store.directory(task_id)/"transcript.json"
+        original=path.read_bytes()
+        assert client.get(f"/api/task/{task_id}/transcript",params={"output_format":output_format}).status_code==200
+        assert path.read_bytes()==original
+        for payload,code in [({"schema_version":99},"unsupported_material_version"),({"duration":5,"segments":[{"text":"missing"}]},"invalid_transcript")]:
+            path.write_text(json.dumps(payload))
+            before=path.read_bytes()
+            response=client.get(f"/api/task/{task_id}/transcript",params={"output_format":output_format})
+            assert response.status_code==409
+            assert response.json()["detail"]["code"]==code
+            assert path.read_bytes()==before
+
+
+def test_transcript_paging_formats_share_segments(tmp_path):
+    with client_for(config(tmp_path)) as client:
+        task_id=finished_task(client.app.state.store)
+        pages=[]
+        for output_format in ["json","markdown","srt"]:
+            response=client.get(f"/api/task/{task_id}/transcript",params={"offset":1,"limit":2,"output_format":output_format})
+            assert response.status_code==200
+            payload=response.json()
+            assert [s["text"] for s in payload["segments"]]==["段落1","段落2"]
+            pages.append(payload["segments"])
+            if output_format!="json":
+                assert "段落1" in payload["content"] and "段落3" not in payload["content"]
+        assert pages[0]==pages[1]==pages[2]
+        assert client.get(f"/api/task/{task_id}/transcript?limit=501").status_code==422
+        assert client.get(f"/api/task/{task_id}/transcript?start=-1").status_code==422
+        assert client.get(f"/api/task/{task_id}/transcript?start=4&end=2").status_code==422
