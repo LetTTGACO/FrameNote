@@ -153,6 +153,7 @@ def test_cli_url_precedence(explicit,env,want,monkeypatch,capsys):
 
 
 def test_cli_copied_skill_paths(tmp_path):
+    (tmp_path / ".git").mkdir()
     script=Path(module.__file__).resolve()
     env={k:v for k,v in os.environ.items() if k!="FRAMENOTE_NOTES_DIR"}
     def root(path):
@@ -169,6 +170,7 @@ def test_cli_copied_skill_paths(tmp_path):
 
 
 def test_standalone_script_in_short_path(tmp_path):
+    (tmp_path / ".git").mkdir()
     import tempfile
     with tempfile.NamedTemporaryFile(suffix=".py",dir="/tmp") as file:
         shutil.copyfile(module.__file__,file.name)
