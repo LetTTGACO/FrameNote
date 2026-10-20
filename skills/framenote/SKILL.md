@@ -34,11 +34,15 @@ FrameNote HTTP 服务负责获取视频、转录和独立截图；你通过随 S
 
 ## 准备与读取材料
 
+用户发送视频链接或本地视频时，直接执行 `transcribe`：
+
 ```bash
 python3 -S <脚本> transcribe '<B站/抖音/YouTube 链接或本地视频路径>' --out-dir '<笔记根目录>' --wait 1800
 ```
 
-本地视频流式上传；服务端保留视频供后续抽帧和取回。脚本打印任务 ID 与进度，并将材料下载到 `materials/`。等待超时后任务继续运行，用 `status <task_id>` 或 `wait <task_id> --timeout 45` 检查，再用 `fetch <task_id> --out-dir ...` 取回。已有任务优先复用；忘记 ID 时用 `tasks --offset 0 --limit 20` 查找。
+本地视频流式上传；服务端保留视频供后续抽帧和取回。脚本打印任务 ID 与进度，并将材料下载到 `materials/`。等待超时后任务继续运行，用 `status <task_id>` 或 `wait <task_id> --timeout 45` 检查，再用 `fetch <task_id> --out-dir ...` 取回。
+
+继续已有任务时，从当前上下文或 `materials/bundle.json` 获取任务 ID。用户要求查找历史记录，或明确继续某个已有任务但缺少任务 ID 时，使用 `tasks --offset 0 --limit 20` 查找，按需翻页。
 
 先读 `materials/metadata.json` 和转录；长视频可按时间和分页读取：
 
