@@ -258,7 +258,7 @@ async def test_galaxy_contract_rejects_failure_and_commits_only_complete_downloa
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("url", ["https://v.douyin.com/test", "https://www.bilibili.com/video/BV1cfaf6SEA9/?p=2",
+@pytest.mark.parametrize("url", ["https://www.bilibili.com/video/BV1cfaf6SEA9/?p=2",
                                  "https://www.youtube.com/watch?v=jNQXAC9IVRw"])
 async def test_galaxy_runs_as_configured_platform_fallback(tmp_path, monkeypatch, url):
     store = TaskStore(tmp_path / "tasks")
@@ -281,6 +281,78 @@ async def test_galaxy_runs_as_configured_platform_fallback(tmp_path, monkeypatch
     monkeypatch.setattr(off, "acquire_upstream", failing_info)
     with pytest.raises(RuntimeError):
         await off.acquire(task_id, lambda: False)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("url", ["https://v.douyin.com/test", "https://www.douyin.com/video/123456"])
+async def test_douyin_uses_galaxy_directly_when_enabled(tmp_path, monkeypatch, url):
+    store = TaskStore(tmp_path / "tasks")
+    pipe = Pipeline(config(tmp_path, galaxy_enabled=True), store)
+    task_id = store.create(video_url=url)["task_id"]
+    directory = store.directory(task_id)
+    calls = []
+
+    async def unexpected_upstream(*args):
+        pytest.fail("Douyin should go directly to Galaxy")
+
+    async def download(self, source_url, target):
+        calls.append((source_url, target))
+        assert store.get(task_id)["phase"] == "galaxy_download"
+        return target / "source.mp4", target / "source.mp4", {"acquisition_provider": "galaxy_api"}
+
+    monkeypatch.setattr(pipe, "acquire_upstream", unexpected_upstream)
+    monkeypatch.setattr(GalaxyDownloader, "download", download)
+    video, audio, info = await pipe.acquire(task_id, lambda: False)
+    assert calls == [(url, directory)]
+    assert info["acquisition_provider"] == "galaxy_api"
+    assert json.loads((directory / "acquisition.json").read_text()) == {
+        "video": video.name, "audio": audio.name, "metadata": info, "notes": []}
+    assert not any("失败" in item["message"] for item in store.get(task_id)["logs"])
+
+
+@pytest.mark.asyncio
+async def test_douyin_uses_upstream_when_galaxy_disabled(tmp_path, monkeypatch):
+    store = TaskStore(tmp_path / "tasks")
+    pipe = Pipeline(config(tmp_path), store)
+    url = "https://v.douyin.com/test"
+    task_id = store.create(video_url=url)["task_id"]
+    calls = []
+
+    async def acquire(task_id, source_url):
+        calls.append(source_url)
+        return Path("video"), Path("audio"), {"acquisition_provider": "upstream"}
+
+    async def unexpected(*args):
+        pytest.fail("Galaxy is disabled")
+
+    monkeypatch.setattr(pipe, "acquire_upstream", acquire)
+    monkeypatch.setattr(GalaxyDownloader, "download", unexpected)
+    assert (await pipe.acquire(task_id, lambda: False))[2]["acquisition_provider"] == "upstream"
+    assert calls == [url]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("outcome", ["failed", "cancelled", "aborted"])
+async def test_douyin_direct_galaxy_propagates_failure_and_cancellation(tmp_path, monkeypatch, outcome):
+    store = TaskStore(tmp_path / "tasks")
+    pipe = Pipeline(config(tmp_path, galaxy_enabled=True), store)
+    task_id = store.create(video_url="https://v.douyin.com/test")["task_id"]
+    error = RuntimeError("Galaxy unavailable") if outcome == "failed" else asyncio.CancelledError()
+    calls = []
+
+    async def unexpected_upstream(*args):
+        pytest.fail("Douyin should go directly to Galaxy")
+
+    async def download(*args):
+        calls.append("galaxy")
+        raise error
+
+    monkeypatch.setattr(pipe, "acquire_upstream", unexpected_upstream)
+    monkeypatch.setattr(GalaxyDownloader, "download", download)
+    with pytest.raises(type(error)):
+        await pipe.acquire(task_id, lambda: outcome == "aborted")
+    assert calls == ([] if outcome == "aborted" else ["galaxy"])
+    assert not (store.directory(task_id) / "acquisition.json").exists()
 
 
 def test_vad_offset_and_maximum_segment_length():

@@ -346,7 +346,7 @@ class MediaDownloader:
         return {'title': info.get('title') or 'Untitled video', 'source': info.get('extractor_key', 'other').lower(), 'duration': info.get('duration') or 0, 'owner': info.get('uploader') or '', 'upload_date': info.get('upload_date') or info.get('release_date') or '', 'timestamp': info.get('release_timestamp') or info.get('timestamp') or 0, 'description': (info.get('description') or '')[:1000], 'thumbnail': info.get('thumbnail') or '', 'view_count': info.get('view_count') or 0, 'like_count': info.get('like_count') or 0, 'subtitles': info.get('subtitles') or {}, 'automatic_captions': info.get('automatic_captions') or {}}
 
     def _extract_douyin_share_info(self, url: str, cookie: dict[str, str] | None) -> dict[str, Any]:
-        """尝试公开分享页解析；失败由服务按配置使用Galaxy API回退。"""
+        """尝试通过抖音公开分享页解析媒体信息。"""
         headers = {'User-Agent': 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1', 'Referer': 'https://www.douyin.com/'}
         cookie_header = self._cookie_header(cookie, douyin=True)
         if cookie_header:

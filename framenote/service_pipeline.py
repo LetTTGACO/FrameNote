@@ -67,21 +67,26 @@ class Pipeline:
             return path, path, {"title": task["title"], "source": "local", "acquisition_provider": "upload"}
         url = task["video_url"]
         source = MediaDownloader.detect_source(url)
-        try:
-            return await self.acquire_upstream(task_id, url)
-        except asyncio.CancelledError:
-            raise
-        except Exception as error:
-            if not self.settings.galaxy_enabled:
-                raise
+        if source == MediaSource.DOUYIN and self.settings.galaxy_enabled:
             if aborted():
                 raise asyncio.CancelledError
-            self.store.log(task_id, f"{source.value} 平台获取失败，使用Galaxy API：" + public_error(error))
-            self.store.update(task_id, phase="galaxy_download")
-            video, audio, info = await GalaxyDownloader(self.settings.galaxy_base_url).download(url, directory)
-            atomic_json(directory / "acquisition.json", {"video": video.name, "audio": audio.name,
-                                                       "metadata": info, "notes": []})
-            return video, audio, info
+            self.store.log(task_id, "抖音使用Galaxy API直接获取")
+        else:
+            try:
+                return await self.acquire_upstream(task_id, url)
+            except asyncio.CancelledError:
+                raise
+            except Exception as error:
+                if not self.settings.galaxy_enabled:
+                    raise
+                if aborted():
+                    raise asyncio.CancelledError
+                self.store.log(task_id, f"{source.value} 平台获取失败，使用Galaxy API：" + public_error(error))
+        self.store.update(task_id, phase="galaxy_download")
+        video, audio, info = await GalaxyDownloader(self.settings.galaxy_base_url).download(url, directory)
+        atomic_json(directory / "acquisition.json", {"video": video.name, "audio": audio.name,
+                                                   "metadata": info, "notes": []})
+        return video, audio, info
 
     async def run(self, task_id: str, aborted: Callable[[], bool]) -> None:
         directory = self.store.directory(task_id)

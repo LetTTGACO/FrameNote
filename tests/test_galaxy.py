@@ -236,13 +236,15 @@ async def test_galaxy_cancellation_removes_private_response_and_partial_media(tm
 
 
 @pytest.mark.asyncio
-async def test_youtube_fallback_runs_through_normalization_and_video_export(galaxy_server, tmp_path, monkeypatch):
+@pytest.mark.parametrize('url,source', [(YOUTUBE, 'youtube'), ('https://v.douyin.com/test', 'douyin')])
+async def test_galaxy_acquisition_runs_through_normalization_and_video_export(galaxy_server, tmp_path, monkeypatch, url, source):
     downloader, state, _ = galaxy_server
+    state['payload']['data']['platform'] = source
     state['payload']['data']['downloadVideoUrl'] = '/media/video.m3u8'
     settings = Settings(tmp_path / 'workspace', SenseVoiceConfig(tmp_path / 'model', tmp_path / 'vad', sys.executable),
                         galaxy_enabled=True, galaxy_base_url=downloader.base_url)
     store = TaskStore(settings.workspace / 'tasks')
-    task_id = store.create(video_url=YOUTUBE)['task_id']
+    task_id = store.create(video_url=url)['task_id']
 
     class Backend:
         def describe(self):
@@ -257,6 +259,8 @@ async def test_youtube_fallback_runs_through_normalization_and_video_export(gala
     pipeline = Pipeline(settings, store, Backend())
 
     async def failing_upstream(*args):
+        if source == 'douyin':
+            pytest.fail('Douyin should go directly to Galaxy')
         raise RuntimeError('upstream blocked https://cdn.example/video?token=private')
 
     monkeypatch.setattr(pipeline, 'acquire_upstream', failing_upstream)
@@ -266,10 +270,10 @@ async def test_youtube_fallback_runs_through_normalization_and_video_export(gala
     directory = store.directory(task_id)
     acquisition = json.loads((directory / 'acquisition.json').read_text())
     assert acquisition['video'] != acquisition['audio']
-    assert acquisition['metadata']['source'] == 'youtube'
+    assert acquisition['metadata']['source'] == source
     assert 'private' not in json.dumps(task) + json.dumps(acquisition)
     metadata = json.loads((directory / 'metadata.json').read_text())
-    assert metadata['source'] == 'youtube'
+    assert metadata['source'] == source
     exported = await prepare_video(directory, task, timeout=30)
     assert {s['codec_type'] for s in (await probe_media(exported))['streams']} == {'video', 'audio'}
     assert (directory / acquisition['audio']).exists()

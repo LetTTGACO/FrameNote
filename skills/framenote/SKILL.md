@@ -46,7 +46,7 @@ python3 -S <脚本> transcribe '<B站/抖音/YouTube 链接或本地视频路径
 python3 -S <脚本> transcript '<task_id>' --start 0 --end 300 --offset 0 --limit 200
 ```
 
-关注 `total_segments/offset/limit`，覆盖视频全程后组织章节。B站按 `?p=N` 处理单个分 P，默认第 1 P。YouTube 支持普通视频、短链、Shorts 和嵌入链接，带播放列表参数时只处理当前视频。平台下载失败时按服务端配置使用 Galaxy 回退；获取阶段与原因见任务状态。
+关注 `total_segments/offset/limit`，覆盖视频全程后组织章节。B站按 `?p=N` 处理单个分 P，默认第 1 P。YouTube 支持普通视频、短链、Shorts 和嵌入链接，带播放列表参数时只处理当前视频。服务端启用 Galaxy 时，抖音直接使用 Galaxy API，B站和 YouTube 在平台下载失败时使用 Galaxy 回退；关闭时各平台使用原生下载。获取阶段与原因见任务状态。
 
 ## 独立截图与视频取回
 

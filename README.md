@@ -81,9 +81,9 @@ my-note/
 
 YouTube 支持普通视频、youtu.be 短链、Shorts、嵌入和已结束直播的视频链接；含播放列表参数的链接只处理当前视频。服务所在机器需能访问 YouTube，并安装 Deno ≥2.3 或 Node.js ≥22；详见[部署指南](docs/DEPLOYMENT.md#youtube-下载依赖)。
 
-B站保留 ?p=N，默认第1P；B站、抖音和 YouTube 先尝试平台下载，按配置启用 Galaxy 外部 API 回退；本地视频流式上传，上限默认2GiB。源视频保留在服务 workspace/tasks/TASK_ID/，可继续截图。SenseVoice 时间为 VAD 语音片段区间，章节边界按近似范围表达。
+B站保留 ?p=N，默认第1P；启用 Galaxy 时，抖音直接使用 Galaxy API，B站和 YouTube 在平台下载失败时使用 Galaxy 回退；关闭时各平台使用原生下载。本地视频流式上传，上限默认2GiB。源视频保留在服务 workspace/tasks/TASK_ID/，可继续截图。SenseVoice 时间为 VAD 语音片段区间，章节边界按近似范围表达。
 
-Galaxy 外部 API 回退使用 [bhwa233/galaxy-downloader](https://github.com/bhwa233/galaxy-downloader) 项目的后端 API。通过 `FRAMENOTE_GALAXY_ENABLED=true` 启用 B站、抖音和 YouTube 的平台下载失败回退。`FRAMENOTE_GALAXY_BASE_URL` 配置后端 API 基址。Galaxy 返回的 HLS 会通过 ffmpeg 下载封装；服务检查实际轨道并按需保留独立音轨，供转写和视频取回使用。
+Galaxy 外部 API 使用 [bhwa233/galaxy-downloader](https://github.com/bhwa233/galaxy-downloader) 项目的后端 API。通过 `FRAMENOTE_GALAXY_ENABLED=true` 启用抖音直接获取及 B站、YouTube 的平台下载失败回退。`FRAMENOTE_GALAXY_BASE_URL` 配置后端 API 基址。Galaxy 返回的 HLS 会通过 ffmpeg 下载封装；服务检查实际轨道并按需保留独立音轨，供转写和视频取回使用。
 
 单 worker 串行转录，JSON 持久化与文件锁保证 workspace 独占。排队任务重启继续，处理中断标记 failed/interrupted并保留已落盘材料；取消等待进程组清理后再处理下一任务。
 
