@@ -23,31 +23,40 @@ python -m uvicorn framenote.service:app --host 127.0.0.1 --port 18121 --workers 
 
 默认一个 venv，推理在独立子进程中运行。模型准备命令从公开固定版本下载全部 10 个文件并校验 SHA-256。另一终端检查 `curl --fail http://127.0.0.1:18121/api/ready`；N100 局域网和 systemd 配置见部署指南。
 
-## 接入 MCP 与 Skill
+## 使用 Skill
 
-在本地创建 `.codex/config.toml`，配置 Streamable HTTP 服务地址；远程使用时替换为客户端可达地址：
-
-```toml
-[mcp_servers.framenote]
-url = "http://127.0.0.1:18121/mcp"
-```
-
-该文件由 Git 忽略，用于保存本机配置。仓库 .agents/skills/framenote 链接项目 [Skill](skills/framenote/SKILL.md)。从源码归档安装时，可建立同样入口：
+仓库 `.agents/skills/framenote` 链接到 [Skill](skills/framenote/SKILL.md)。其他项目可复制整个 `skills/framenote` 到其 `.agents/skills/framenote`；用户级安装可复制到 `~/.agents/skills/framenote`。源码归档可建立项目入口：
 
 ```bash
 mkdir -p .agents/skills
 ln -s ../../skills/framenote .agents/skills/framenote
 ```
 
-其他项目可复制整个 skills/framenote 到其 .agents/skills/framenote。上传和材料下载脚本仅使用 Python 标准库，服务可部署在另一台机器：
+Skill 通过 `scripts/headless.py` 调用 HTTP 服务，客户端仅需 Python 标准库。在当前工作项目中运行脚本；安装位置与项目配置查找无关。
 
-```bash
-python3 -S skills/framenote/scripts/headless.py --service-url http://127.0.0.1:18121 transcribe '<视频链接或本地路径>' --out-dir ./my-note
-python3 -S skills/framenote/scripts/headless.py --service-url http://127.0.0.1:18121 frames TASK_ID --timestamps 30 90 --out-dir ./my-note
-python3 -S skills/framenote/scripts/headless.py --service-url http://127.0.0.1:18121 fetch TASK_ID --out-dir ./my-note
+复制 [.framenote.example.json](.framenote.example.json) 为项目根目录的 `.framenote.json`，将 `service_url` 改为后端可达地址。同机使用 `http://127.0.0.1:18121`，异机使用 `http://SERVER:18121`。用户级默认值写入 `~/.config/framenote/client.json`，两者使用相同格式：
+
+```json
+{
+  "service_url": "http://127.0.0.1:18121",
+  "download_video": false
+}
 ```
 
-9 个工具：transcribe_video、get_task_status、wait_for_task、list_tasks、get_transcript、extract_frames、get_frame、get_artifacts、cancel_task。wait 最多45秒，转录每页最多500段，单次抽帧最多24张；get_frame 返回原生图像。stdio 入口为 `python -m framenote.service_mcp`，服务基址由 FRAMENOTE_SERVICE_URL 配置。
+优先级：命令行参数 → 环境变量 → 最近的项目配置 → 用户配置 → 内置默认值，按字段覆盖。项目配置从执行目录向上寻找，最多到 Git 根目录；非 Git 目录查到文件系统根。相对 `notes_dir` 按配置文件所在目录解析；实际项目配置由 Git 忽略。完整规则见[配置指南](docs/CONFIGURATION.md)。
+
+```bash
+python3 -S skills/framenote/scripts/headless.py config
+python3 -S skills/framenote/scripts/headless.py notes-dir
+python3 -S skills/framenote/scripts/headless.py transcribe '<视频链接或本地路径>' --out-dir ./my-note --wait 1800
+python3 -S skills/framenote/scripts/headless.py transcript TASK_ID --start 30 --end 90 --limit 200
+python3 -S skills/framenote/scripts/headless.py frames TASK_ID --timestamps 30 90 --out-dir ./my-note
+python3 -S skills/framenote/scripts/headless.py fetch TASK_ID --out-dir ./my-note --download-video
+```
+
+`tasks` 分页查找旧任务；`status`、`wait`、`cancel` 管理任务；`artifacts` 列出材料入口。转录每页最多 500 段，单次抽帧最多 24 张。Agent 读取下载到本机的转写与实际截图，再组织笔记。
+
+视频自动取回默认关闭。配置 `download_video: true` 或设置 `FRAMENOTE_DOWNLOAD_VIDEO=true` 开启自动取回；`--download-video` / `--no-download-video` 覆盖单次执行。视频保存为 `materials/video.*`，信息记录在 `bundle.json`；重复取回会校验本地文件并通过 ETag 复用。视频沿用服务端已获取的画质；分离音轨按需合并为 MP4，源素材保留。
 
 ## 阅读材料
 
@@ -64,6 +73,7 @@ my-note/
     ├── asr.raw.json
     ├── metadata.json
     ├── bundle.json
+    ├── video.*                 # 开启取回时保存
     └── corrections.md
 ```
 

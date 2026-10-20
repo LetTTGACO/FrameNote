@@ -1,5 +1,5 @@
 include LICENSE NOTICE README.md
-include .codex/config.toml
+include .framenote.example.json
 recursive-include skills/framenote *.md *.py
 recursive-include deploy *.service *.example
 recursive-include docs *.md
@@ -13,5 +13,7 @@ prune .runtime
 prune .venv
 prune .git
 exclude service.env
+exclude .framenote.json
+prune .codex
 exclude .DS_Store
 global-exclude __pycache__ *.py[cod] .DS_Store

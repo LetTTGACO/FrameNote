@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-- `framenote/` contains the FastAPI service, MCP tools, serial jobs, media acquisition, persistence, and frame extraction. ASR contracts and adapters live in `framenote/asr/`; its model lock pins downloadable assets.
+- `framenote/` contains the FastAPI HTTP service, serial jobs, media acquisition, persistence, and frame extraction. ASR contracts and adapters live in `framenote/asr/`; its model lock pins downloadable assets.
 - `tests/` mirrors these responsibilities; shared fixtures belong in `tests/conftest.py`.
 - `skills/framenote/` contains the canonical Skill and standard-library client. `.agents/skills/framenote` links to it; edit the canonical files.
 - `docs/` documents contracts and operations; `deploy/` contains environment and systemd templates. Generated media and notes belong in ignored `workspace/`.
@@ -51,4 +51,4 @@ Use concise imperative subjects with existing prefixes: `feat:`, `fix:`, `docs:`
 
 ## Configuration & Deployment
 
-Keep `service.env`, models, and task materials untracked. Before deployment, follow `docs/DEPLOYMENT.md` and preserve existing tasks.
+Keep `service.env`, `.framenote.json`, models, and task materials untracked. Client defaults live in `~/.config/framenote/client.json`; project overrides follow the execution directory, independent of Skill installation. Before deployment, follow `docs/DEPLOYMENT.md` and preserve existing tasks.

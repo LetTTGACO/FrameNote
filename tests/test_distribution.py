@@ -31,15 +31,20 @@ def test_wheel_and_sdist_contents(distributions):
     with zipfile.ZipFile(wheel) as archive:
         names=archive.namelist()
         assert "framenote/asr/models.lock.json" in names
+        assert "framenote/service_mcp.py" not in names
+        metadata = archive.read(next(name for name in names if name.endswith(".dist-info/METADATA"))).decode()
+        assert "Requires-Dist: mcp" not in metadata
         assert any(name.endswith("/licenses/LICENSE") for name in names)
         assert any(name.endswith("/licenses/NOTICE") for name in names)
     with tarfile.open(source) as archive:
         names={name.split("/",1)[1] for name in archive.getnames() if "/" in name}
         expected={"skills/framenote/SKILL.md","skills/framenote/scripts/headless.py","deploy/framenote.service",
-                  "deploy/service.env.example","README.md","docs/MODELS.md","docs/ASR.md","LICENSE","NOTICE"}
+                  "deploy/service.env.example",".framenote.example.json","README.md","docs/MODELS.md","docs/ASR.md","LICENSE","NOTICE"}
         assert expected <= names,expected-names
         assert not any(part in {".local",".superpowers","workspace","models"} for name in names for part in Path(name).parts)
         assert not any(name.startswith("docs/superpowers/") for name in names)
+        assert ".framenote.json" not in names
+        assert not any(name.startswith(".codex/") for name in names)
 
 
 def test_installed_wheel_runs_outside_checkout(distributions,tmp_path):

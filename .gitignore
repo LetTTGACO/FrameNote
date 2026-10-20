@@ -11,5 +11,6 @@ dist/
 workspace/
 models/
 service.env
+.framenote.json
 .codex/config.toml
 .DS_Store
