@@ -21,6 +21,14 @@ brew install python@3.12 ffmpeg libsndfile
 
 已有受支持的 Python 和系统工具可直接创建 venv；检查 python --version、ffmpeg -version、ffprobe -version、curl --version。运行库的安装按 pyproject 的四项固定 ASR 版本起步，实际两机结果在验收记录中保存。
 
+## YouTube 下载依赖
+
+YouTube 通过 yt-dlp 获取媒体。项目依赖 `yt-dlp[default]`，随安装提供匹配的 `yt-dlp-ejs`；服务自动启用 PATH 中的 Deno ≥2.3 或 Node.js ≥22，供 yt-dlp 处理 YouTube 的 JavaScript 验证。依赖要求见 [yt-dlp EJS 指南](https://github.com/yt-dlp/yt-dlp/wiki/EJS)。
+
+macOS 可用 `brew install deno`；Ubuntu 按 [Deno 安装说明](https://docs.deno.com/runtime/getting_started/installation/)安装，或使用已有的 Node.js ≥22。安装后用运行服务的用户执行 `deno --version` 或 `node --version`。systemd 的 PATH 也需包含相应可执行文件目录；装在交互式用户目录中的运行时不会自动出现在服务用户的 PATH 中。
+
+服务所在机器需能访问 YouTube 及其媒体 CDN。普通视频、youtu.be、Shorts、嵌入和已结束直播链接统一为单视频地址；含 `list` 参数的链接只下载当前视频。获取失败时查看任务 `acquisition.log`，检查网络、yt-dlp 版本与平台访问限制。
+
 ## 源码或发行包安装
 
 从源码根目录执行：

@@ -15,6 +15,9 @@ def test_reject_non_http_and_do_not_misclassify_lookalike_domains(tmp_path: Path
         processor.detect_source('D:/private/video.mp4')
     assert processor.detect_source('https://notbilibili.com/video/BV1xx') == MediaSource.OTHER
     assert processor.detect_source('https://notdouyin.com/video/123') == MediaSource.OTHER
+    assert processor.detect_source('https://www.youtube.com/watch?v=BaW_jenozKc') == MediaSource.YOUTUBE
+    assert processor.detect_source('https://youtu.be/BaW_jenozKc') == MediaSource.YOUTUBE
+    assert processor.detect_source('https://notyoutube.com/watch?v=BaW_jenozKc') == MediaSource.OTHER
 
 def test_normalize_video_input_accepts_loose_bilibili_text() -> None:
     assert normalize_video_input('https://www.bilibili.com/video/BV1xM4y1z7Kt?p=1') == 'https://www.bilibili.com/video/BV1xM4y1z7Kt?p=1'
@@ -27,6 +30,69 @@ def test_normalize_video_input_accepts_loose_bilibili_text() -> None:
 def test_normalize_video_input_accepts_douyin_share_text() -> None:
     assert normalize_video_input('复制打开 https://v.douyin.com/AbCd3Fg/ 看视频') == 'https://v.douyin.com/AbCd3Fg'
     assert normalize_video_input('www.douyin.com/video/123456。') == 'https://www.douyin.com/video/123456'
+
+
+def test_normalize_video_input_extracts_youtube_without_matching_lookalikes() -> None:
+    assert normalize_video_input('分享 https://youtu.be/BaW_jenozKc。') == 'https://youtu.be/BaW_jenozKc'
+    assert normalize_video_input('www.youtube.com/shorts/BaW_jenozKc') == 'https://www.youtube.com/shorts/BaW_jenozKc'
+    assert normalize_video_input('分享 notyoutube.com/watch?v=BaW_jenozKc') is None
+    assert normalize_video_input('分享 https://evil.test/youtube.com/watch?v=BaW_jenozKc') is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('separate_audio', [False, True])
+async def test_youtube_acquisition_keeps_video_and_fetches_separate_audio(tmp_path, monkeypatch, video, separate_audio):
+    import subprocess
+    import yt_dlp
+    from framenote.service_acquire import acquire
+
+    source = video
+    if separate_audio:
+        source = tmp_path / 'silent.mp4'
+        subprocess.run(['ffmpeg', '-v', 'error', '-i', str(video), '-an', '-c:v', 'copy', str(source)], check=True)
+    calls = []
+
+    class FakeYdl:
+        def __init__(self, options):
+            self.options = options
+            assert options['noplaylist'] is True
+            assert set(options['js_runtimes']) == {'deno', 'node'}
+            assert 'cookiefile' not in options
+            assert 'http_headers' not in options
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def extract_info(self, url, download=False):
+            assert url == 'https://www.youtube.com/watch?v=BaW_jenozKc'
+            calls.append(self.options.get('format', 'metadata'))
+            if download:
+                target = Path(self.options['outtmpl'].replace('%(ext)s', 'mp4'))
+                target.write_bytes((video if target.stem == 'audio' else source).read_bytes())
+            return {'title': 'YouTube fixture', 'extractor_key': 'Youtube', 'uploader': 'fixture'}
+
+        def sanitize_info(self, info):
+            return info
+
+    monkeypatch.setattr(yt_dlp, 'YoutubeDL', FakeYdl)
+    await acquire(tmp_path, 'youtube-task', 'https://www.youtube.com/watch?v=BaW_jenozKc')
+    result = json.loads((tmp_path / 'youtube-task/acquisition.json').read_text())
+    assert result['metadata']['source'] == 'youtube'
+    assert result['metadata']['title'] == 'YouTube fixture'
+    assert result['metadata']['acquisition_provider'] == 'upstream'
+    assert (tmp_path / 'youtube-task' / result['video']).read_bytes() == source.read_bytes()
+    assert result['audio'] == ('audio.mp4' if separate_audio else result['video'])
+    assert len(calls) == (3 if separate_audio else 2)
+
+
+def test_youtube_does_not_relabel_other_platform_credentials(tmp_path):
+    processor = MediaDownloader(tmp_path)
+    domain = processor._cookie_domain_for_url('https://youtu.be/BaW_jenozKc')
+    assert domain == '.youtube.com'
+    assert processor._write_cookie_file({'sessdata': 'private', 'sessionid': 'private'}, domain) is None
 
 def test_douyin_share_page_info_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     processor = MediaDownloader(tmp_path)

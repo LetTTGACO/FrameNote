@@ -1,6 +1,6 @@
 ---
 name: framenote
-description: Use when 用户直接发送B站或抖音视频链接、要求处理本地视频，或继续讨论已处理的视频。
+description: Use when 用户直接发送B站、抖音或 YouTube 视频链接、要求处理本地视频，或继续讨论已处理的视频。
 ---
 
 # 视频材料与章节笔记
@@ -35,7 +35,7 @@ FrameNote HTTP 服务负责获取视频、转录和独立截图；你通过随 S
 ## 准备与读取材料
 
 ```bash
-python3 -S <脚本> transcribe '<B站/抖音链接或本地视频路径>' --out-dir '<笔记根目录>' --wait 1800
+python3 -S <脚本> transcribe '<B站/抖音/YouTube 链接或本地视频路径>' --out-dir '<笔记根目录>' --wait 1800
 ```
 
 本地视频流式上传；服务端保留视频供后续抽帧和取回。脚本打印任务 ID 与进度，并将材料下载到 `materials/`。等待超时后任务继续运行，用 `status <task_id>` 或 `wait <task_id> --timeout 45` 检查，再用 `fetch <task_id> --out-dir ...` 取回。已有任务优先复用；忘记 ID 时用 `tasks --offset 0 --limit 20` 查找。
@@ -46,7 +46,7 @@ python3 -S <脚本> transcribe '<B站/抖音链接或本地视频路径>' --out-
 python3 -S <脚本> transcript '<task_id>' --start 0 --end 300 --offset 0 --limit 200
 ```
 
-关注 `total_segments/offset/limit`，覆盖视频全程后组织章节。B站按 `?p=N` 处理单个分 P，默认第 1 P。抖音下载失败时按服务端配置使用 Galaxy 回退；获取阶段与原因见任务状态。
+关注 `total_segments/offset/limit`，覆盖视频全程后组织章节。B站按 `?p=N` 处理单个分 P，默认第 1 P。YouTube 支持普通视频、短链、Shorts 和嵌入链接，带播放列表参数时只处理当前视频。平台下载失败时按服务端配置使用 Galaxy 回退；获取阶段与原因见任务状态。
 
 ## 独立截图与视频取回
 

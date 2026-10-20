@@ -1,4 +1,4 @@
-"""Bilibili and Douyin acquisition, derived from like-attract/video-to-note (MIT)."""
+"""Platform media acquisition, derived from like-attract/video-to-note (MIT)."""
 from __future__ import annotations
 import asyncio
 import contextlib
@@ -15,12 +15,13 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from urllib.parse import urlunsplit, parse_qs, urlencode, urlparse, urljoin
 import yt_dlp
-_EMBEDDED_LINK_RE = re.compile('(?:https?://)?(?:www\\.|m\\.|v\\.)?(?:bilibili\\.com|b23\\.tv|douyin\\.com|iesdouyin\\.com)/\\S+', re.I)
+_EMBEDDED_LINK_RE = re.compile(r'(?<![A-Za-z0-9_.@/-])(?:https?://)?(?:www\.|m\.|v\.|music\.)?(?:bilibili\.com|b23\.tv|douyin\.com|iesdouyin\.com|youtube\.com|youtu\.be|youtube-nocookie\.com)/\S+', re.I)
 _TRAILING_PUNCT = '.,;:!?。，；：！？、）】」』”'
 
 class MediaSource(str, Enum):
     BILIBILI = 'bilibili'
     DOUYIN = 'douyin'
+    YOUTUBE = 'youtube'
     LOCAL = 'local'
     OTHER = 'other'
 
@@ -64,6 +65,8 @@ class MediaDownloader:
             return MediaSource.BILIBILI
         if host == 'douyin.com' or host.endswith('.douyin.com') or host == 'iesdouyin.com' or host.endswith('.iesdouyin.com'):
             return MediaSource.DOUYIN
+        if host in {'youtu.be', 'www.youtu.be', 'youtube.com', 'youtube-nocookie.com'} or host.endswith(('.youtube.com', '.youtube-nocookie.com')):
+            return MediaSource.YOUTUBE
         return MediaSource.OTHER
 
     async def get_video_info(self, url_or_path: str, cookie: dict[str, str] | None=None, allow_local: bool=False, notes: list[str] | None=None) -> dict[str, Any]:
@@ -456,9 +459,11 @@ class MediaDownloader:
         mapping: tuple[tuple[str, str | None], ...]
         if domain == '.bilibili.com':
             mapping = (('SESSDATA', cookie.get('sessdata')), ('bili_jct', cookie.get('bili_jct')), ('buvid3', cookie.get('buvid3')), ('buvid4', cookie.get('buvid4')), ('b_nut', cookie.get('b_nut')), ('b_lsid', cookie.get('b_lsid')))
-        else:
+        elif domain in {'.douyin.com', '.iesdouyin.com'}:
             names = ('msToken', 'ttwid', 'odin_tt', 'passport_csrf_token', 'sid_guard', 'sessionid', 'sessionid_ss', 's_v_web_id', '__ac_nonce', '__ac_signature', 'tt_scid', 'csrf_session_id')
             mapping = tuple(((name, cookie.get(name)) for name in names))
+        else:
+            return None
         mapping = tuple(((name, str(value).replace('\t', '').replace('\r', '').replace('\n', '')) for name, value in mapping if value))
         if not mapping:
             return None
@@ -476,6 +481,10 @@ class MediaDownloader:
         """构造 YoutubeDL：cookie 走临时 cookiefile，退出时自动清理。"""
         user_agent = self.DOUYIN_USER_AGENT if cookie_domain in {'.douyin.com', '.iesdouyin.com'} else self.BILI_USER_AGENT
         options = self._base_ydl_options(user_agent)
+        if cookie_domain == '.youtube.com':
+            # Let yt-dlp use its own headers and solve YouTube's JS challenges.
+            options.pop('http_headers', None)
+            options['js_runtimes'] = {'deno': {}, 'node': {}}
         cookie_file: Path | None = None
         try:
             cookie_file = self._write_cookie_file(cookie, cookie_domain)
@@ -498,6 +507,8 @@ class MediaDownloader:
             return '.iesdouyin.com'
         if host == 'douyin.com' or host.endswith('.douyin.com'):
             return '.douyin.com'
+        if MediaDownloader.detect_source(url) == MediaSource.YOUTUBE:
+            return '.youtube.com'
         return '.bilibili.com'
 
     @staticmethod
@@ -526,7 +537,7 @@ def bilibili_page_url(url: str, page: int) -> str:
 
 def normalize_video_input(value: str) -> str | None:
     """宽松识别视频输入：完整 http(s) 链接原样返回；否则从分享文本中提取
-    B 站或抖音链接（可缺省 scheme），或裸 BV/av 号补全为视频页 URL。
+    B 站、抖音或 YouTube 链接（可缺省 scheme），或裸 BV/av 号补全为视频页 URL。
     无法识别时返回 None。"""
     text = (value or '').strip()
     if not text:
@@ -545,6 +556,23 @@ def normalize_video_input(value: str) -> str | None:
     if av:
         return f'https://www.bilibili.com/video/av{av.group(1)}'
     return None
+
+
+def youtube_video_url(url: str) -> str:
+    """Normalize a single YouTube video, dropping playlist and share parameters."""
+    parsed = urlparse(url)
+    parts = parsed.path.strip('/').split('/')
+    if parsed.hostname in {'youtu.be', 'www.youtu.be'} and len(parts) == 1:
+        video_id = parts[0]
+    elif parsed.path.rstrip('/') == '/watch':
+        video_id = parse_qs(parsed.query).get('v', [''])[-1]
+    elif len(parts) == 2 and parts[0] in {'shorts', 'embed', 'live', 'v'}:
+        video_id = parts[1]
+    else:
+        video_id = ''
+    if not re.fullmatch(r'[A-Za-z0-9_-]{11}', video_id):
+        raise ValueError('请提供 YouTube 单个视频链接。')
+    return f'https://www.youtube.com/watch?v={video_id}'
 
 
 def resolve_bilibili_url(url: str) -> str:

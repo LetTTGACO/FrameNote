@@ -37,3 +37,10 @@ def test_settings_defaults_paths_and_precedence(tmp_path, monkeypatch):
 def test_settings_reject_invalid_numbers_and_backend(env, tmp_path):
     with pytest.raises(ValueError):
         Settings.from_env(env, base_dir=tmp_path)
+
+
+def test_galaxy_master_switch_is_exposed_in_health(tmp_path):
+    enabled = Settings.from_env({"FRAMENOTE_GALAXY_ENABLED": "true"}, base_dir=tmp_path)
+    assert enabled.galaxy_enabled
+    with TestClient(create_app(enabled)) as client:
+        assert client.get("/api/health").json()["galaxy_enabled"] is True

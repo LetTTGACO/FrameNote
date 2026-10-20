@@ -319,7 +319,7 @@ def main() -> None:
     def command(name, **kwargs):
         return commands.add_parser(name, parents=[common], **kwargs)
     transcribe = command("transcribe")
-    transcribe.add_argument("source", help="B站/抖音链接或本地视频路径")
+    transcribe.add_argument("source", help="B站/抖音/YouTube 链接或本地视频路径")
     transcribe.add_argument("--wait", type=float, default=1800)
     transcribe.add_argument("--out-dir", type=Path, required=True, help="笔记根目录；材料归入 materials/")
     frames = command("frames")

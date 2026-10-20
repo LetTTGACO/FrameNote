@@ -19,17 +19,19 @@ from .asr import create_backend
 from .asr.types import ASRBackend, ASRRequest, ASRProgress, ASRError, result_to_payload
 from .task_store import TaskStore, atomic_json, public_error
 from .transcript import TranscriptSegment, finite_number, segments_to_prompt, segments_to_srt
-from .acquisition import MediaDownloader, MediaSource, bilibili_page_url, normalize_video_input
+from .acquisition import MediaDownloader, MediaSource, bilibili_page_url, normalize_video_input, youtube_video_url
 
 
 def platform_url(value: str) -> str:
     url = normalize_video_input(value)
     if not url:
-        raise ValueError("请提供B站或抖音视频链接；本地视频请先上传。")
+        raise ValueError("请提供B站、抖音或 YouTube 视频链接；本地视频请先上传。")
     parsed = urlsplit(url)
     source = MediaDownloader.detect_source(url)
-    if source not in {MediaSource.BILIBILI, MediaSource.DOUYIN} or parsed.username or parsed.port not in {None, 80, 443}:
-        raise ValueError("仅接受B站和抖音平台链接。")
+    if source not in {MediaSource.BILIBILI, MediaSource.DOUYIN, MediaSource.YOUTUBE} or parsed.username or parsed.port not in {None, 80, 443}:
+        raise ValueError("仅接受B站、抖音和 YouTube 平台链接。")
+    if source == MediaSource.YOUTUBE:
+        return youtube_video_url(url)
     if source == MediaSource.BILIBILI and parsed.hostname != "b23.tv" and "p=" not in parsed.query:
         url = bilibili_page_url(url, 1)
     return url
@@ -70,12 +72,16 @@ class Pipeline:
         except asyncio.CancelledError:
             raise
         except Exception as error:
-            if source != MediaSource.DOUYIN or not self.settings.galaxy_enabled:
+            if not self.settings.galaxy_enabled:
                 raise
-            self.store.log(task_id, "原版抖音获取失败，使用Galaxy API：" + public_error(error))
+            if aborted():
+                raise asyncio.CancelledError
+            self.store.log(task_id, f"{source.value} 平台获取失败，使用Galaxy API：" + public_error(error))
             self.store.update(task_id, phase="galaxy_download")
-            video, info = await GalaxyDownloader(self.settings.galaxy_base_url).download(url, directory)
-            return video, video, info
+            video, audio, info = await GalaxyDownloader(self.settings.galaxy_base_url).download(url, directory)
+            atomic_json(directory / "acquisition.json", {"video": video.name, "audio": audio.name,
+                                                       "metadata": info, "notes": []})
+            return video, audio, info
 
     async def run(self, task_id: str, aborted: Callable[[], bool]) -> None:
         directory = self.store.directory(task_id)

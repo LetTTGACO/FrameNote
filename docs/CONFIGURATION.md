@@ -12,13 +12,25 @@
 | FRAMENOTE_ASR_THREADS | 4，正整数 |
 | FRAMENOTE_PROCESS_TIMEOUT | 7200 秒，正有限数；同时用于本地推理 |
 | FRAMENOTE_MAX_UPLOAD_BYTES | 2147483648，正整数 |
-| FRAMENOTE_GALAXY_ENABLED | false；true/yes/1 启用抖音获取失败回退 |
+| FRAMENOTE_GALAXY_ENABLED | false；true/yes/1 启用平台获取失败回退 |
 | FRAMENOTE_GALAXY_BASE_URL | https://downloader-api.bhwa233.com |
 | FRAMENOTE_SERVICE_URL | 客户端服务基址，默认 http://127.0.0.1:18121 |
 | FRAMENOTE_NOTES_DIR | 客户端笔记父目录覆盖 |
 | FRAMENOTE_DOWNLOAD_VIDEO | 客户端自动取回视频，默认 false |
 
 默认在同一个 venv 安装服务与 .[asr]。覆盖 FRAMENOTE_ASR_PYTHON 时，目标 Python 同样需要安装 FrameNote 和 ASR 依赖；服务仍以独立子进程执行推理。可执行路径中有空格也可直接传入，不需要在变量值中添加 shell 引号。
+
+## Galaxy 回退
+
+B站、抖音和 YouTube 优先使用平台下载，失败时尝试 Galaxy。总开关默认关闭，启用方式：
+
+```text
+FRAMENOTE_GALAXY_ENABLED=true
+```
+
+`/api/health` 返回 Galaxy 回退的开关状态。
+
+HLS 播放列表通过 ffmpeg 下载封装，直链媒体通过 curl 下载。服务依据 ffprobe 检测结果判断是否需要独立音频，保留已完成素材并清理失败或取消的临时下载。Galaxy 解析响应中的临时下载地址不进入公开元数据；服务所在机器仍需能访问返回的媒体 CDN。
 
 ## 加载与检查
 

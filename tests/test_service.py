@@ -54,10 +54,48 @@ def test_persistence_recovery_does_not_lose_completed_or_queued_tasks(tmp_path):
 
 
 @pytest.mark.parametrize("url", ["http://127.0.0.1/a", "https://douyin.com.evil.test/a", "file:///etc/passwd",
-                                    "https://example.com/video", "https://user@www.douyin.com/video/123"])
+                                    "https://example.com/video", "https://user@www.douyin.com/video/123",
+                                    "https://youtube.com.evil.test/watch?v=BaW_jenozKc",
+                                    "https://notyoutube.com/watch?v=BaW_jenozKc",
+                                    "https://youtu.be.evil.test/BaW_jenozKc",
+                                    "https://user@www.youtube.com/watch?v=BaW_jenozKc",
+                                    "https://www.youtube.com:8080/watch?v=BaW_jenozKc",
+                                    "https://www.youtube.com/playlist?list=PL123",
+                                    "https://www.youtube.com/@channel",
+                                    "https://www.youtube.com/watch?v=invalid",
+                                    "https://youtu.be/BaW_jenozKc/extra"])
 def test_input_is_limited_to_supported_platforms(url):
     with pytest.raises(ValueError):
         platform_url(url)
+
+
+@pytest.mark.parametrize("url", [
+    "https://www.youtube.com/watch?v=BaW_jenozKc&list=PL123&index=2",
+    "https://youtu.be/BaW_jenozKc?si=share&t=30",
+    "https://m.youtube.com/watch?v=BaW_jenozKc",
+    "https://music.youtube.com/watch?v=BaW_jenozKc",
+    "https://www.youtube.com/shorts/BaW_jenozKc",
+    "https://www.youtube.com/live/BaW_jenozKc",
+    "https://www.youtube.com/embed/BaW_jenozKc",
+    "https://www.youtube-nocookie.com/embed/BaW_jenozKc",
+    "youtu.be/BaW_jenozKc",
+    "看这个视频 https://youtu.be/BaW_jenozKc。",
+])
+def test_youtube_links_select_one_video(url):
+    assert platform_url(url) == "https://www.youtube.com/watch?v=BaW_jenozKc"
+
+
+def test_youtube_api_submission_preserves_single_video_identity(tmp_path, monkeypatch):
+    async def run(self, task_id, aborted):
+        self.store.update(task_id, status="completed", phase="completed", progress=100)
+
+    monkeypatch.setattr(Pipeline, "run", run)
+    with client_for(config(tmp_path)) as client:
+        response = client.post("/api/transcribe", json={"video_url": "https://youtu.be/BaW_jenozKc?list=PL123"})
+        assert response.status_code == 200
+        task = client.get(f"/api/task/{response.json()['task_id']}").json()
+        assert task["video_url"] == "https://www.youtube.com/watch?v=BaW_jenozKc"
+        assert client.post("/api/transcribe", json={"video_url": "https://www.youtube.com/playlist?list=PL123"}).status_code == 422
 
 
 def test_bilibili_page_identity_is_preserved():
@@ -200,6 +238,8 @@ async def test_galaxy_contract_rejects_failure_and_commits_only_complete_downloa
 
     async def fake_run(args, **kwargs):
         calls.append(args)
+        if args[0] == "ffprobe":
+            return json.dumps({"format": {"duration": "5"}, "streams": [{"codec_type": "video"}, {"codec_type": "audio"}]}).encode()
         if "/api/parse?" in args[-1]:
             Path(args[args.index("--output") + 1]).write_text(json.dumps({"success": True, "data": {"platform": "douyin", "title": "教程", "downloadVideoUrl": "/api/download?id=secret"}}))
             return b""
@@ -207,8 +247,9 @@ async def test_galaxy_contract_rejects_failure_and_commits_only_complete_downloa
         return b""
 
     monkeypatch.setattr("framenote.galaxy_downloader.run_process", fake_run)
-    video_path, meta = await GalaxyDownloader("https://api.example").download("https://v.douyin.com/test", tmp_path)
+    video_path, audio_path, meta = await GalaxyDownloader("https://api.example").download("https://v.douyin.com/test", tmp_path)
     assert video_path.read_bytes() == b"video"
+    assert audio_path == video_path
     assert calls[0][-1].startswith("https://api.example/api/parse?url=https%3A")
     assert meta["acquisition_provider"] == "galaxy_api" and "secret" not in json.dumps(meta)
     assert not list(tmp_path.glob("*.part"))
@@ -216,7 +257,9 @@ async def test_galaxy_contract_rejects_failure_and_commits_only_complete_downloa
 
 
 @pytest.mark.asyncio
-async def test_galaxy_only_runs_as_configured_douyin_fallback(tmp_path, monkeypatch):
+@pytest.mark.parametrize("url", ["https://v.douyin.com/test", "https://www.bilibili.com/video/BV1cfaf6SEA9/?p=2",
+                                 "https://www.youtube.com/watch?v=jNQXAC9IVRw"])
+async def test_galaxy_runs_as_configured_platform_fallback(tmp_path, monkeypatch, url):
     store = TaskStore(tmp_path / "tasks")
     pipe = Pipeline(config(tmp_path, galaxy_enabled=True), store)
     called = []
@@ -226,20 +269,17 @@ async def test_galaxy_only_runs_as_configured_douyin_fallback(tmp_path, monkeypa
 
     async def fake_galaxy(self, url, directory):
         called.append(url)
-        return directory / "source.mp4", {"acquisition_provider": "galaxy_api"}
+        return directory / "source.mp4", directory / "source.mp4", {"acquisition_provider": "galaxy_api"}
 
     monkeypatch.setattr(pipe, "acquire_upstream", failing_info)
     monkeypatch.setattr(GalaxyDownloader, "download", fake_galaxy)
-    douyin = store.create(video_url="https://v.douyin.com/test")["task_id"]
-    assert (await pipe.acquire(douyin, lambda: False))[2]["acquisition_provider"] == "galaxy_api"
-    bili = store.create(video_url="https://www.bilibili.com/video/BV1cfaf6SEA9/")["task_id"]
-    with pytest.raises(RuntimeError):
-        await pipe.acquire(bili, lambda: False)
-    assert len(called) == 1
+    task_id = store.create(video_url=url)["task_id"]
+    assert (await pipe.acquire(task_id, lambda: False))[2]["acquisition_provider"] == "galaxy_api"
+    assert called == [url]
     off = Pipeline(config(tmp_path), store)
     monkeypatch.setattr(off, "acquire_upstream", failing_info)
     with pytest.raises(RuntimeError):
-        await off.acquire(douyin, lambda: False)
+        await off.acquire(task_id, lambda: False)
 
 
 def test_vad_offset_and_maximum_segment_length():
