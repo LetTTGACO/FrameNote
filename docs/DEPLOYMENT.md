@@ -84,11 +84,11 @@ sudo systemctl status framenote.service --no-pager
 sudo journalctl -u framenote.service -n 60 --no-pager
 ```
 
-unit 显式使用 User/Group、工作目录、环境文件、venv Python、0.0.0.0:18121、单 worker，StateDirectory 创建数据目录，停止宽限为30秒，失败后5秒重启。客户端将 MCP/服务基址改为这台机器的可达地址。停止/重启分别使用 `sudo systemctl stop framenote.service`、`sudo systemctl restart framenote.service`。
+unit 显式使用 User/Group、工作目录、环境文件、venv Python、0.0.0.0:18121、单 worker，StateDirectory 创建数据目录，停止宽限为30秒，失败后5秒重启。客户端在 `.framenote.json` 或用户配置中填写这台机器的 HTTP 服务基址。停止/重启分别使用 `sudo systemctl stop framenote.service`、`sudo systemctl restart framenote.service`。
 
 ## 升级与恢复
 
-1. 记录当前 wheel、源码提交、Python/包版本；保存自定义 service.env、项目 MCP 地址与完整备份。
+1. 记录当前 wheel、源码提交、Python/包版本；保存自定义 service.env、客户端配置与完整备份。
 2. 停止服务，备份当前 venv 到可恢复的位置（保持原绝对路径），保存原 unit。升级期间保留模型和 workspace。
 3. 使用该 venv 的 Python 安装指定的新 wheel，并运行 pip check、models verify。先以候选 workspace/端口执行 ready 与短视频/截图核对，再恢复正式 unit 的启动。
 4. 用旧 task_id 回读原稿/截图，检查新任务完成；记录升级结果。

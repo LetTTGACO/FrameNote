@@ -12,15 +12,15 @@ from typing import Any, Literal, cast
 import uuid
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, model_validator
 
 from .frame_extractor import extract_frame
-from .service_mcp import create_mcp
 from .service_pipeline import Pipeline, platform_url
 from .service_settings import Settings
+from .service_video import prepare_video, retained_video
 from .jobs import Jobs
-from .task_store import TERMINAL, TaskStore, atomic_json, public_error
+from .task_store import TaskStore, atomic_json, public_error
 from .transcript import MaterialError, TranscriptSegment, read_transcript, segments_to_prompt, segments_to_srt
 
 ARTIFACT_NAMES = {"metadata.json", "transcript.json", "transcript.md", "transcript.srt", "asr.raw.json", "frames.json"}
@@ -52,6 +52,12 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
     backend = runtime_pipeline.backend
     jobs = Jobs(store, runtime_pipeline)
     frame_locks: dict[str, asyncio.Lock] = {}
+    video_locks: dict[str, asyncio.Lock] = {}
+
+    def public_task(task: dict) -> dict:
+        directory = store.directory(task["task_id"])
+        available = (directory.resolve().parent == store.root and retained_video(directory, task) is not None)
+        return {**task, "downloads": {"video": f"/api/task/{task['task_id']}/video"} if available else {}}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -63,14 +69,11 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
             await asyncio.to_thread(backend.health)
             await jobs.start()
             try:
-                async with remote_mcp.session_manager.run():
-                    yield
+                yield
             finally:
                 await jobs.stop()
 
     app = FastAPI(title="FrameNote", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
-    remote_mcp = create_mcp(app=app)
-    mcp_app = remote_mcp.streamable_http_app()
     app.state.store, app.state.jobs, app.state.backend = store, jobs, backend
 
     @app.exception_handler(KeyError)
@@ -135,11 +138,30 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
     @app.get("/api/tasks")
     async def list_tasks(offset: int = Query(0, ge=0), limit: int = Query(20, ge=1, le=100)):
         tasks = store.all()
-        return {"tasks": tasks[offset:offset + limit], "total": len(tasks)}
+        return {"tasks": [public_task(task) for task in tasks[offset:offset + limit]], "total": len(tasks)}
 
     @app.get("/api/task/{task_id}")
     async def task_status(task_id: str):
-        return store.get(task_id)
+        return public_task(store.get(task_id))
+
+    @app.get("/api/task/{task_id}/video")
+    async def video(task_id: str, request: Request):
+        async with video_locks.setdefault(task_id, asyncio.Lock()):
+            task = store.get(task_id)
+            directory = store.directory(task_id)
+            if directory.resolve().parent != store.root or retained_video(directory, task) is None:
+                raise HTTPException(409, "Source video is not ready")
+            try:
+                path = await prepare_video(directory, task, config.process_timeout)
+            except (TimeoutError, asyncio.TimeoutError) as error:
+                raise HTTPException(504, "Video preparation timed out; retry the download") from error
+            except (ValueError, RuntimeError) as error:
+                raise HTTPException(422, public_error(error)) from error
+            suffix = ".mp4" if path.suffix.lower() == ".m4s" else path.suffix.lower()
+            response = FileResponse(path, filename="video" + suffix, stat_result=path.stat())
+            if request.headers.get("if-none-match") == response.headers.get("etag"):
+                return Response(status_code=304, headers={"ETag": response.headers["etag"]})
+            return response
 
     @app.post("/api/task/{task_id}/cancel")
     async def cancel(task_id: str):
@@ -203,9 +225,10 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
 
     @app.get("/api/task/{task_id}/artifacts")
     async def artifacts(task_id: str):
-        store.get(task_id)
+        task = store.get(task_id)
         directory = store.directory(task_id)
-        return {"schema_version": 2, "task_id": task_id, "artifacts": [{"name": name, "bytes": (directory / name).stat().st_size,
+        return {"schema_version": 2, "task_id": task_id, "downloads": public_task(task)["downloads"],
+                "artifacts": [{"name": name, "bytes": (directory / name).stat().st_size,
                                 "url": f"/api/task/{task_id}/artifacts/{name}"}
                                for name in sorted(ARTIFACT_NAMES) if (directory / name).is_file()]}
 
@@ -217,7 +240,6 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
             raise HTTPException(404, "Artifact not found")
         return FileResponse(path, filename=name)
 
-    app.mount("/", mcp_app)
     return app
 
 

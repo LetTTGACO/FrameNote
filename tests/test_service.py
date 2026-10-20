@@ -114,9 +114,67 @@ def test_no_ui_and_lan_access(tmp_path):
     with TestClient(app, client=("192.168.31.42", 50000)) as client:
         assert client.get("/").status_code == 404
         assert client.get("/docs").status_code == 404
+        assert client.post("/mcp", json={"method":"tools/list"}).status_code == 404
         assert client.get("/api/health").json()["mode"] == "headless"
         assert client.post("/api/transcribe", json={"video_url": "https://example.com"}).status_code == 422
         assert client.get("/api/health").status_code == 200
+
+
+def test_retained_video_download_is_discoverable_and_does_not_mutate_task(tmp_path, video):
+    with client_for(config(tmp_path / "workspace")) as client:
+        task_id = finished_task(client.app.state.store, video)
+        directory = client.app.state.store.directory(task_id)
+        before = (directory / "task.json").read_bytes()
+        route = f"/api/task/{task_id}/video"
+        assert client.get(f"/api/task/{task_id}").json()["downloads"]["video"] == route
+        manifest = client.get(f"/api/task/{task_id}/artifacts").json()
+        assert manifest["downloads"]["video"] == route
+        assert all(item["name"] != "source.mp4" for item in manifest["artifacts"])
+        response = client.get(route)
+        assert response.status_code == 200
+        assert response.content == video.read_bytes()
+        assert "video.mp4" in response.headers["content-disposition"]
+        assert client.get(route, headers={"If-None-Match": response.headers["etag"]}).status_code == 304
+        assert (directory / "task.json").read_bytes() == before
+        assert client.get("/api/tasks").json()["tasks"][0]["downloads"]["video"] == route
+
+
+@pytest.mark.parametrize("name", [None, "../outside.mp4", "/tmp/outside.mp4", "escape.mp4"])
+def test_video_download_rejects_missing_and_external_assets(tmp_path, name):
+    outside = tmp_path / "outside.mp4"
+    outside.write_bytes(b"private")
+    with client_for(config(tmp_path / "workspace")) as client:
+        task = client.app.state.store.create(status="completed", assets={"video": name} if name else {})
+        task_id = task["task_id"]
+        if name == "escape.mp4":
+            (client.app.state.store.directory(task_id) / name).symlink_to(outside)
+        assert client.get(f"/api/task/{task_id}").json()["downloads"] == {}
+        assert client.get(f"/api/task/{task_id}/video").status_code == 409
+
+
+def test_separate_retained_audio_is_muxed_once_without_changing_sources(tmp_path, video):
+    with client_for(config(tmp_path / "workspace")) as client:
+        task_id = finished_task(client.app.state.store)
+        directory = client.app.state.store.directory(task_id)
+        source, audio = directory / "preview.mp4", directory / "original.m4a"
+        subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-an", "-c:v", "copy", str(source)], check=True)
+        subprocess.run(["ffmpeg", "-v", "error", "-i", str(video), "-vn", "-c:a", "copy", str(audio)], check=True)
+        original = {path.name: path.read_bytes() for path in (source, audio)}
+        atomic_json(directory / "acquisition.json", {"video": source.name, "audio": audio.name})
+        client.app.state.store.update(task_id, assets={"video": source.name, "audio": "audio.flac"})
+        response = client.get(f"/api/task/{task_id}/video")
+        assert response.status_code == 200
+        downloaded = tmp_path / "downloaded.mp4"
+        downloaded.write_bytes(response.content)
+        media = json.loads(subprocess.run(["ffprobe", "-v", "error", "-show_streams", "-of", "json", str(downloaded)],
+            capture_output=True, text=True, check=True).stdout)
+        assert {stream["codec_type"] for stream in media["streams"]} == {"video", "audio"}
+        cached = directory / "video.download.mp4"
+        before = cached.stat().st_mtime_ns
+        assert client.get(f"/api/task/{task_id}/video", headers={"If-None-Match": response.headers["etag"]}).status_code == 304
+        assert cached.stat().st_mtime_ns == before
+        assert {path.name: path.read_bytes() for path in (source, audio)} == original
+        assert not list(directory.glob("video.download.*.mp4"))
 
 
 @pytest.mark.asyncio
