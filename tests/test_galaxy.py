@@ -37,7 +37,7 @@ def galaxy_server(tmp_path, video):
                     '-hls_list_size', '0', str(media / 'audio.m3u8')], check=True)
     state = {'payload': {'success': True, 'data': {'platform': 'youtube', 'title': 'fixture',
              'downloadVideoUrl': '/media/video.mp4?token=private', 'downloadAudioUrl': '/media/audio.m4a?token=private',
-             'videoAudioMode': 'muxed'}}, 'requests': [], 'media_resets_left': 0}
+             'videoAudioMode': 'muxed'}}, 'requests': [], 'media_resets_left': 0, 'ranges': [], 'range_mode': None}
 
     class Handler(SimpleHTTPRequestHandler):
         def do_GET(self):
@@ -57,6 +57,24 @@ def galaxy_server(tmp_path, video):
                 self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
                 self.connection.close()
                 self.close_connection = True
+            elif urlsplit(self.path).path == '/media/video.mp4' and state['range_mode']:
+                body = (media / 'video.mp4').read_bytes()
+                value = self.headers.get('Range', '')
+                state['ranges'].append(value)
+                if not value or (state['range_mode'] == 'ignored_after_first' and not value.startswith('bytes=0-')):
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(body)
+                    return
+                start, end = map(int, value.removeprefix('bytes=').split('-'))
+                end = min(end, len(body) - 1)
+                self.send_response(206)
+                claimed_start = start + 1 if state['range_mode'] == 'invalid' else start
+                total = len(body) + (1 if start and state['range_mode'] == 'changed_total' else 0)
+                self.send_header('Content-Range', f'bytes {claimed_start}-{end}/{total}')
+                self.send_header('Content-Length', str(end - start + 1))
+                self.end_headers()
+                self.wfile.write(body[start:end + 1])
             else:
                 super().do_GET()
 
@@ -118,6 +136,41 @@ async def test_galaxy_accepts_supported_platforms_and_preserves_source_url(galax
 
 
 @pytest.mark.asyncio
+async def test_galaxy_assembles_byte_ranges_without_losing_or_duplicating_data(galaxy_server, video, monkeypatch):
+    downloader, state, directory = galaxy_server
+    state['range_mode'] = 'valid'
+    monkeypatch.setattr(GalaxyDownloader, 'HTTP_CHUNK_BYTES', 4096, raising=False)
+    downloaded, _, _ = await downloader.download(YOUTUBE, directory)
+    assert downloaded.read_bytes() == video.read_bytes()
+    assert state['ranges'][0] == 'bytes=0-4095'
+    assert len(state['ranges']) == (video.stat().st_size + 4095) // 4096
+    assert not list(directory.glob('*.part'))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['invalid', 'changed_total'])
+async def test_galaxy_rejects_inconsistent_byte_ranges(galaxy_server, monkeypatch, mode):
+    downloader, state, directory = galaxy_server
+    state['range_mode'] = mode
+    monkeypatch.setattr(GalaxyDownloader, 'HTTP_CHUNK_BYTES', 4096, raising=False)
+    with pytest.raises(RuntimeError, match='range'):
+        await downloader.download(YOUTUBE, directory)
+    assert not (directory / 'source.mp4').exists()
+    assert not list(directory.glob('*.part'))
+
+
+@pytest.mark.asyncio
+async def test_galaxy_replaces_partial_if_server_stops_honoring_ranges(galaxy_server, video, monkeypatch):
+    downloader, state, directory = galaxy_server
+    state['range_mode'] = 'ignored_after_first'
+    monkeypatch.setattr(GalaxyDownloader, 'HTTP_CHUNK_BYTES', 4096)
+    downloaded, _, _ = await downloader.download(YOUTUBE, directory)
+    assert downloaded.read_bytes() == video.read_bytes()
+    assert state['ranges'] == ['bytes=0-4095', 'bytes=4096-8191']
+    assert not list(directory.glob('*.part'))
+
+
+@pytest.mark.asyncio
 async def test_galaxy_retries_connection_reset_without_committing_truncated_media(galaxy_server, video):
     downloader, state, directory = galaxy_server
     state['media_resets_left'] = 1
@@ -166,6 +219,7 @@ async def test_galaxy_cancellation_removes_private_response_and_partial_media(tm
             if stage != 'parse':
                 return b''
         elif args[0] == 'curl':
+            Path(args[args.index('--dump-header') + 1]).write_text('HTTP/1.1 200 OK\r\n\r\n')
             Path(args[args.index('--output') + 1]).write_bytes(b'#EXTM3U\n' if stage == 'hls' else b'partial')
             if stage == 'hls':
                 return b''

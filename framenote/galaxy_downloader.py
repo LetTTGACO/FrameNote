@@ -1,8 +1,11 @@
 """Optional Galaxy resolver with retained media and separate audio support."""
 from __future__ import annotations
 
+import asyncio
 import json
 import math
+import re
+import shutil
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode, urljoin, urlsplit
@@ -12,6 +15,8 @@ from .service_process import run_process
 
 
 class GalaxyDownloader:
+    HTTP_CHUNK_BYTES = 8 << 20
+
     def __init__(self, base_url: str):
         parsed = urlsplit(base_url)
         if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username:
@@ -29,15 +34,58 @@ class GalaxyDownloader:
             raise RuntimeError("Unsupported Galaxy media URL")
         return url
 
+    async def _fetch_media(self, url: str, partial: Path) -> None:
+        # Bounded ranges avoid throttling of full YouTube audio transfers. Only
+        # append complete, verified chunks so a retry cannot duplicate bytes.
+        chunk = partial.with_name(partial.name + ".chunk.part")
+        headers = partial.with_name(partial.name + ".headers.part")
+        offset = 0
+        total: int | None = None
+        try:
+            while total is None or offset < total:
+                end = offset + self.HTTP_CHUNK_BYTES - 1
+                await run_process([
+                    "curl", "--fail", "--silent", "--show-error", "--location", "--proto", "=http,https",
+                    "--connect-timeout", "15", "--max-time", "1800", "--retry", "2", "--retry-all-errors",
+                    "--range", f"{offset}-{end}", "--header", "Accept-Encoding: identity",
+                    "--dump-header", str(headers), "--output", str(chunk), url,
+                ], timeout=1900, log=partial.parent / "download.log")
+                status = 0
+                fields: dict[str, str] = {}
+                # Redirects, proxy CONNECT and retries can each add a block.
+                for line in headers.read_text(encoding="latin-1").splitlines():
+                    if line.startswith("HTTP/"):
+                        status = int(line.split()[1])
+                        fields = {}
+                    elif ":" in line:
+                        name, value = line.split(":", 1)
+                        fields[name.lower()] = value.strip()
+                if status == 200:
+                    # A server may ignore Range and return the entire object.
+                    chunk.replace(partial)
+                    return
+                match = re.fullmatch(r"bytes (\d+)-(\d+)/(\d+)", fields.get("content-range", ""))
+                if status != 206 or match is None:
+                    raise RuntimeError("Galaxy media returned an invalid byte range")
+                first, last, size = map(int, match.groups())
+                if (first != offset or last < first or last > end or last >= size
+                        or (total is not None and size != total) or chunk.stat().st_size != last - first + 1):
+                    raise RuntimeError("Galaxy media returned an inconsistent byte range")
+                with partial.open("wb" if offset == 0 else "ab") as output, chunk.open("rb") as source:
+                    shutil.copyfileobj(source, output)
+                total = size
+                offset = last + 1
+                chunk.unlink()
+                headers.unlink()
+        finally:
+            chunk.unlink(missing_ok=True)
+            headers.unlink(missing_ok=True)
+
     async def _download_media(self, url: str, target: Path, kind: str) -> tuple[Path, dict]:
         partial = target.with_name(target.name + ".part")
         remux = target.with_name(target.name + ".remux.part")
         try:
-            await run_process([
-                "curl", "--fail", "--silent", "--show-error", "--location", "--proto", "=http,https",
-                "--connect-timeout", "15", "--max-time", "1800", "--retry", "2", "--retry-all-errors",
-                "--output", str(partial), url,
-            ], timeout=1900, log=target.parent / "download.log")
+            await asyncio.wait_for(self._fetch_media(url, partial), timeout=1900)
             if not partial.is_file() or partial.stat().st_size == 0:
                 raise RuntimeError("Galaxy download is empty")
             with partial.open("rb") as stream:

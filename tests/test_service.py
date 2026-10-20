@@ -243,6 +243,7 @@ async def test_galaxy_contract_rejects_failure_and_commits_only_complete_downloa
         if "/api/parse?" in args[-1]:
             Path(args[args.index("--output") + 1]).write_text(json.dumps({"success": True, "data": {"platform": "douyin", "title": "教程", "downloadVideoUrl": "/api/download?id=secret"}}))
             return b""
+        Path(args[args.index("--dump-header") + 1]).write_text("HTTP/1.1 200 OK\r\n\r\n")
         Path(args[args.index("--output") + 1]).write_bytes(b"video")
         return b""
 
