@@ -4,6 +4,8 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
+import socket
+import struct
 import subprocess
 import sys
 from threading import Thread
@@ -35,7 +37,7 @@ def galaxy_server(tmp_path, video):
                     '-hls_list_size', '0', str(media / 'audio.m3u8')], check=True)
     state = {'payload': {'success': True, 'data': {'platform': 'youtube', 'title': 'fixture',
              'downloadVideoUrl': '/media/video.mp4?token=private', 'downloadAudioUrl': '/media/audio.m4a?token=private',
-             'videoAudioMode': 'muxed'}}, 'requests': []}
+             'videoAudioMode': 'muxed'}}, 'requests': [], 'media_resets_left': 0}
 
     class Handler(SimpleHTTPRequestHandler):
         def do_GET(self):
@@ -44,6 +46,17 @@ def galaxy_server(tmp_path, video):
                 self.send_response(200)
                 self.end_headers()
                 self.wfile.write(json.dumps(state['payload']).encode())
+            elif urlsplit(self.path).path == '/media/video.mp4' and state['media_resets_left']:
+                state['media_resets_left'] -= 1
+                body = (media / 'video.mp4').read_bytes()
+                self.send_response(200)
+                self.send_header('Content-Length', str(len(body)))
+                self.end_headers()
+                self.wfile.write(body[:1024])
+                self.wfile.flush()
+                self.connection.setsockopt(socket.SOL_SOCKET, socket.SO_LINGER, struct.pack('ii', 1, 0))
+                self.connection.close()
+                self.close_connection = True
             else:
                 super().do_GET()
 
@@ -102,6 +115,17 @@ async def test_galaxy_accepts_supported_platforms_and_preserves_source_url(galax
     assert video == audio and video.is_file()
     assert info['source'] == source and info['source_url'] == url
     assert parse_qs(urlsplit(state['requests'][0]).query)['url'] == [url]
+
+
+@pytest.mark.asyncio
+async def test_galaxy_retries_connection_reset_without_committing_truncated_media(galaxy_server, video):
+    downloader, state, directory = galaxy_server
+    state['media_resets_left'] = 1
+    downloaded, audio, _ = await downloader.download(YOUTUBE, directory)
+    assert downloaded.read_bytes() == video.read_bytes()
+    assert audio == downloaded
+    assert sum(urlsplit(request).path == '/media/video.mp4' for request in state['requests']) == 2
+    assert not list(directory.glob('*.part'))
 
 
 @pytest.mark.asyncio

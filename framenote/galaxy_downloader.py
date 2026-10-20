@@ -35,7 +35,7 @@ class GalaxyDownloader:
         try:
             await run_process([
                 "curl", "--fail", "--silent", "--show-error", "--location", "--proto", "=http,https",
-                "--connect-timeout", "15", "--max-time", "1800", "--retry", "2",
+                "--connect-timeout", "15", "--max-time", "1800", "--retry", "2", "--retry-all-errors",
                 "--output", str(partial), url,
             ], timeout=1900, log=target.parent / "download.log")
             if not partial.is_file() or partial.stat().st_size == 0:
