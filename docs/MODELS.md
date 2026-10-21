@@ -1,19 +1,64 @@
-# 模型准备与核验
+# 准备和核验模型
 
-在安装 FrameNote 的 Python 环境中运行；命令使用标准库，默认清单是随包分发的资源，与启动目录无关。
+本指南供 FrameNote 部署者使用，说明如何下载固定版本的模型、离线核验完整性，以及查找资产来源和许可。命令使用 Python 标准库；在已安装 FrameNote 的环境中执行。
+
+## 准备并核验模型
+
+确保运行目录可写，且下载模型的机器能访问锁文件中的公开来源，然后完成以下步骤：
+
+1. 下载模型：
+
+   ```bash
+   python -m framenote.models prepare --out models
+   ```
+
+   命令下载固定清单中的 10 个文件，复用已匹配的文件。成功时输出：
+
+   ```text
+   Verified all model assets
+   ```
+
+2. 离线核验全部文件：
+
+   ```bash
+   python -m framenote.models verify --out models
+   ```
+
+   成功时同样输出 `Verified all model assets`。失败时退出码为 `1`，错误消息列出缺失或损坏的文件。
+
+3. 将服务的模型路径指向 `models/sensevoice` 和 `models/vad`。
+   使用其他输出目录时，同步调整 `FRAMENOTE_SENSEVOICE_MODEL` 和 `FRAMENOTE_VAD_MODEL`，参见[服务端配置](CONFIGURATION.md#服务端配置)。
+
+`prepare` 先下载到目标文件同目录的临时 `.part` 文件，核对字节数和 SHA-256 后再原子替换。每个文件的下载时限为 120 秒。失败时保留原有文件并清理临时文件；重新执行 `prepare` 可继续处理缺失或损坏的资产。
+
+`verify` 完全离线。把整个 `models/` 复制到另一台机器后，在目标机器重新执行核验。服务的就绪检查只确认文件存在及依赖可用，完整哈希检查由 `verify` 完成。
+
+## 使用自定义清单
+
+默认清单是随包分发的 [models.lock.json](../framenote/asr/models.lock.json)，与执行目录无关。需要使用自定义资产时，在两个命令中传入相同的清单：
 
 ```bash
-python -m framenote.models prepare --out models
-python -m framenote.models verify --out models
+python -m framenote.models prepare --out models --manifest 'MANIFEST_PATH'
+python -m framenote.models verify --out models --manifest 'MANIFEST_PATH'
 ```
 
-prepare 从下表公开仓库的固定提交下载全部 10 个文件。每个文件先保存到同目录的临时 .part，核对字节数与 SHA-256 后原子替换；已匹配文件复用，下载失败保留原有文件并清理临时文件。每个下载的超时为 120 秒。失败时退出码为 1，并指出目标文件；重跑 prepare 可继续准备缺失/损坏资产。
+将 `MANIFEST_PATH` 替换为自定义 `models.lock.json` 的路径。确认两个命令均输出 `Verified all model assets`。
 
-verify 完全离线，逐个检查所有文件并汇总缺项。可将整个 models/ 复制到另一机器，再运行 verify。服务配置分别指向 models/sensevoice 和 models/vad；服务启动的轻量文件检查不代替准备阶段的完整哈希核验。
+清单顶层为 `schema_version=1`，`files` 为非空数组。每个资产包含以下字段：
 
-自定义清单可使用 `--manifest /path/to/models.lock.json`。清单格式与默认包资源一致：schema_version=1，每项含 target、repo、40 位固定 revision、url、bytes、sha256、license_url；目标仅可位于输出目录中的 sensevoice/ 或 vad/，不能借 symlink 越界。默认资源见 [models.lock.json](../framenote/asr/models.lock.json)。
+| 字段 | 要求 |
+| --- | --- |
+| `target` | 唯一的相对路径，形式为 `sensevoice/FILENAME` 或 `vad/FILENAME`，其中 `FILENAME` 是文件名；解析符号链接后仍位于输出目录内 |
+| `repo` | 非空的来源仓库名 |
+| `revision` | 40 位小写十六进制固定提交标识 |
+| `url` | 下载文件的 HTTP 或 HTTPS URL，不含用户名或密码 |
+| `bytes` | 文件字节数，正整数 |
+| `sha256` | 64 位小写十六进制 SHA-256 |
+| `license_url` | 许可来源的 HTTP 或 HTTPS URL，不含用户名或密码 |
 
 ## 固定资产
+
+默认锁文件记录的资产、提交和哈希如下。下载 URL 使用 ModelScope 仓库的固定提交路径，BPE 分词模型来自独立的 `iic/SenseVoiceSmall` 仓库：
 
 | 目标文件 | 公开仓库 | 文件版本 | SHA-256 |
 | --- | --- | --- | --- |
@@ -28,10 +73,19 @@ verify 完全离线，逐个检查所有文件并汇总缺项。可将整个 mod
 | vad/configuration.json | damo/speech_fsmn_vad_zh-cn-16k-common-onnx | bdaa7c49489f31282c1c17a3b86e2c80e40f8d30 | f62fcbcebbaade798714b34c521cad87d869ee6a327ceed948e01ff2336bbfc0 |
 | vad/model_quant.onnx | damo/speech_fsmn_vad_zh-cn-16k-common-onnx | f436483dfd1bf3eb1b410133ff86ecc9e10abc4a | 5289eb2aa3c9af2d7a4284bcfa7c3ceb81d360814ed4203239b6c5d0569da8a1 |
 
-清单中的 URL 为 ModelScope 对应仓库的 resolve/<revision>/<file> 路径；BPE 来自独立的 iic/SenseVoiceSmall 仓库。所有 10 个资产已在本轮从公开源重新下载并通过完整校验。
+默认 10 个资产的独立下载与完整核验结果记录在[2026-10-20 原生部署验收](VALIDATION-NATIVE.md#安装与模型)。该记录描述对应版本的验收，实际部署仍需执行核验。
 
 ## 来源与许可
 
-FrameNote 代码沿用项目 [LICENSE](../LICENSE) 与 [NOTICE](../NOTICE) 的 MIT 及上游归属。运行依赖保留各自发行包的许可，安装时可通过包元数据查询；模型文件按其上游来源和模型许可管理。
+FrameNote 代码的 MIT 许可和上游归属见 [LICENSE](../LICENSE) 与 [NOTICE](../NOTICE)。运行依赖保留各自发行包的许可，可从包元数据查询；模型资产按各自上游来源和模型许可管理。
 
-模型来源：[SenseVoice ONNX](https://modelscope.cn/models/iic/SenseVoiceSmall-onnx)、[SenseVoice/BPE](https://modelscope.cn/models/iic/SenseVoiceSmall)、[FSMN VAD ONNX](https://modelscope.cn/models/damo/speech_fsmn_vad_zh-cn-16k-common-onnx)。模型卡链接单独的 [FunASR MODEL_LICENSE](https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE)；[SenseVoice 模型卡](https://huggingface.co/FunAudioLLM/SenseVoiceSmall/blob/main/README.md) 和 [ONNX 运行代码](https://github.com/modelscope/FunASR/tree/main/runtime/python/onnxruntime) 分别说明模型与代码来源。发行包保存固定下载清单和许可来源链接，权重由准备命令从上游取得。
+模型与运行代码的来源如下：
+
+- [SenseVoice ONNX 模型](https://modelscope.cn/models/iic/SenseVoiceSmall-onnx)。
+- [SenseVoice 与 BPE 模型](https://modelscope.cn/models/iic/SenseVoiceSmall)。
+- [FSMN VAD ONNX 模型](https://modelscope.cn/models/damo/speech_fsmn_vad_zh-cn-16k-common-onnx)。
+- [FunASR MODEL_LICENSE](https://github.com/modelscope/FunASR/blob/main/MODEL_LICENSE)，模型清单保留的许可来源。
+- [SenseVoice 模型卡](https://huggingface.co/FunAudioLLM/SenseVoiceSmall/blob/main/README.md)。
+- [FunASR ONNX 运行代码](https://github.com/modelscope/FunASR/tree/main/runtime/python/onnxruntime)。
+
+发行包保存固定下载清单与许可链接，权重由准备命令从上游下载。模型核验通过后，按[启动并验证服务](DEPLOYMENT.md#启动并验证服务)继续部署。

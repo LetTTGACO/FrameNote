@@ -1,103 +1,170 @@
 # FrameNote
 
-把 B站、抖音、YouTube 或本地视频变成可供 Agent 阅读、整理与继续讨论的材料。服务负责媒体获取、SenseVoiceSmall ONNX INT8 转录、任务持久化和独立截图；Codex 通过项目 Skill 写章节笔记和逐章原稿。
+FrameNote 可以将 B站、抖音、YouTube 或本地视频整理成可阅读、可追溯的章节笔记。HTTP 服务获取视频、生成转录并按需截图；Agent 通过 Skill 读取材料，撰写章节笔记和分章原稿。
 
-## 快速运行
+从本页完成服务启动和 Skill 配置后，你可以发送视频链接开始整理。服务器运维见[部署指南](docs/DEPLOYMENT.md)，日常命令见[使用指南](docs/USAGE.md)。
 
-支持 Python 3.10–3.12，原生部署目标为 Ubuntu x86_64 与 Apple Silicon macOS arm64。系统先安装 ffmpeg/ffprobe、curl 和音频库，平台命令见 [部署指南](docs/DEPLOYMENT.md)。
+## 准备运行环境
+
+在运行服务的机器上准备以下依赖：
+
+- Python 3.10–3.12。原生部署目标为 Ubuntu x86_64 和 Apple Silicon macOS arm64。
+- `ffmpeg`、`ffprobe`、`curl` 和 `libsndfile`。安装命令见[安装系统依赖](docs/DEPLOYMENT.md#安装系统依赖)。
+- 可访问模型下载源和目标视频平台的网络。
+- 如需处理 YouTube，准备[YouTube 下载依赖](docs/DEPLOYMENT.md#youtube-下载依赖)。
+
+服务与自动语音识别（ASR）依赖安装在同一个虚拟环境中，推理在独立子进程中运行。客户端只需要 Python 标准库，可以与服务运行在不同机器上。
+
+## 启动服务
+
+在服务机器的终端中完成以下步骤：
+
+1. 获取源码：
+
+   ```bash
+   git clone https://github.com/LetTTGACO/FrameNote.git
+   ```
+
+2. 进入仓库：
+
+   ```bash
+   cd FrameNote
+   ```
+
+3. 创建虚拟环境：
+
+   ```bash
+   python3 -m venv .venv
+   ```
+
+4. 激活虚拟环境：
+
+   ```bash
+   . .venv/bin/activate
+   ```
+
+5. 安装服务和 ASR 依赖：
+
+   ```bash
+   python -m pip install '.[asr]'
+   ```
+
+6. 准备模型：
+
+   ```bash
+   python -m framenote.models prepare --out models
+   ```
+
+   命令下载并校验固定清单中的 10 个文件，成功后输出
+   `Verified all model assets`。离线复核和来源见[模型指南](docs/MODELS.md)。
+
+7. 首次配置时，复制环境变量模板：
+
+   ```bash
+   cp deploy/service.env.example service.env
+   ```
+
+   默认路径相对仓库根目录。已有 `service.env` 时，保留自定义值；各项含义见[配置参考](docs/CONFIGURATION.md)。
+
+8. 将配置加载到终端环境：
+
+   ```bash
+   set -a
+   . ./service.env
+   set +a
+   ```
+
+9. 启动单 worker 服务：
+
+   ```bash
+   python -m uvicorn framenote.service:app \
+     --host 127.0.0.1 --port 18121 --workers 1 --no-proxy-headers
+   ```
+
+10. 在另一个终端检查服务是否就绪：
+
+    ```bash
+    curl --fail http://127.0.0.1:18121/api/ready
+    ```
+
+    成功时返回 HTTP `200`，响应中的 `configured` 和 `available` 都为 `true`。
+    如果返回 `503`，按 `reason` 修复模型或依赖，参见[排障](docs/DEPLOYMENT.md#排障)。
+
+## 安装并配置 Skill
+
+[FrameNote Skill](skills/framenote/SKILL.md) 和客户端位于 `skills/framenote/`。
+在 FrameNote 仓库中使用时，按以下步骤建立入口：
+
+1. 创建项目 Skill 目录：
+
+   ```bash
+   mkdir -p .agents/skills
+   ```
+
+2. 如果 `.agents/skills/framenote` 尚不存在，创建链接：
+
+   ```bash
+   ln -s ../../skills/framenote .agents/skills/framenote
+   ```
+
+3. 首次配置时，复制客户端模板：
+
+   ```bash
+   cp .framenote.example.json .framenote.json
+   ```
+
+4. 将 `.framenote.json` 中的 `service_url` 设为客户端可达的服务地址。
+   同机运行可使用这个配置：
+
+   ```json
+   {
+     "service_url": "http://127.0.0.1:18121",
+     "download_video": false
+   }
+   ```
+
+   跨机器运行时，填写服务器地址，并按[部署指南](docs/DEPLOYMENT.md#配置-systemd-服务)配置监听地址。
+
+5. 在客户端的工作项目中检查配置：
+
+   ```bash
+   python3 -S skills/framenote/scripts/headless.py config
+   ```
+
+   确认输出中的 `service_url` 和 `notes_dir` 指向预期位置。
+
+其他项目可把整个 `skills/framenote/` 复制到该项目的 `.agents/skills/framenote/`；用户级安装位置为 `~/.agents/skills/framenote/`。脚本按执行目录查找项目配置，Skill 安装位置不影响配置查找。
+
+## 整理第一个视频
+
+在已加载 Skill 的 Codex 对话中发送视频链接或本地视频路径。Agent 获取转录、组织章节、查看截图，然后生成 `notes.md` 和 `chapters-transcript.md`。
+
+要先用命令行检查材料获取，在仓库根目录运行：
 
 ```bash
-git clone https://github.com/LetTTGACO/FrameNote.git
-cd FrameNote
-python3 -m venv .venv
-. .venv/bin/activate
-python -m pip install '.[asr]'
-python -m framenote.models prepare --out models
-python -m framenote.models verify --out models
-cp deploy/service.env.example service.env
-set -a
-. ./service.env
-set +a
-python -m uvicorn framenote.service:app --host 127.0.0.1 --port 18121 --workers 1 --no-proxy-headers
+python3 -S skills/framenote/scripts/headless.py transcribe 'VIDEO_SOURCE' \
+  --out-dir ./my-note --wait 1800
 ```
 
-默认一个 venv，推理在独立子进程中运行。模型准备命令从公开固定版本下载全部 10 个文件并校验 SHA-256。另一终端检查 `curl --fail http://127.0.0.1:18121/api/ready`；N100 局域网和 systemd 配置见部署指南。
+将 `VIDEO_SOURCE` 替换为视频链接或本地视频路径。成功后，材料保存在 `my-note/materials/`；阅读文档由 Agent 根据这些材料撰写。检查 `materials/bundle.json` 中的任务状态是否为 `completed`、`download_complete` 是否为 `true`。
 
-## 使用 Skill
+视频自动取回默认关闭。转录分页、任务管理、截图和视频取回见[使用指南](docs/USAGE.md)。
 
-仓库 `.agents/skills/framenote` 链接到 [Skill](skills/framenote/SKILL.md)。其他项目可复制整个 `skills/framenote` 到其 `.agents/skills/framenote`；用户级安装可复制到 `~/.agents/skills/framenote`。源码归档可建立项目入口：
+## 继续阅读
 
-```bash
-mkdir -p .agents/skills
-ln -s ../../skills/framenote .agents/skills/framenote
-```
+按你要完成的任务选择文档：
 
-Skill 通过 `scripts/headless.py` 调用 HTTP 服务，客户端仅需 Python 标准库。在当前工作项目中运行脚本；安装位置与项目配置查找无关。
+| 任务 | 文档 |
+| --- | --- |
+| 获取材料、管理任务、截图和取回视频 | [使用指南](docs/USAGE.md) |
+| 设置服务环境变量和客户端配置 | [配置参考](docs/CONFIGURATION.md) |
+| 安装、升级、备份和排障 | [部署指南](docs/DEPLOYMENT.md) |
+| 下载模型、核验哈希和查找许可来源 | [模型指南](docs/MODELS.md) |
+| 理解服务、客户端和 Agent 的分工 | [系统范围](docs/SCOPE.md) |
+| 接入其他 ASR 后端 | [ASR 契约与扩展指南](docs/ASR.md) |
+| 修改代码并运行检查 | [贡献与 Agent 指南](AGENTS.md) |
+| 核对 0.1.0 的历史验收证据 | [材料验收记录](docs/VALIDATION.md)、[原生部署验收记录](docs/VALIDATION-NATIVE.md) |
 
-复制 [.framenote.example.json](.framenote.example.json) 为项目根目录的 `.framenote.json`，将 `service_url` 改为后端可达地址。同机使用 `http://127.0.0.1:18121`，异机使用 `http://SERVER:18121`。用户级默认值写入 `~/.config/framenote/client.json`，两者使用相同格式：
+## 来源与许可
 
-```json
-{
-  "service_url": "http://127.0.0.1:18121",
-  "download_video": false
-}
-```
-
-优先级：命令行参数 → 环境变量 → 最近的项目配置 → 用户配置 → 内置默认值，按字段覆盖。项目配置从执行目录向上寻找，最多到 Git 根目录；非 Git 目录查到文件系统根。相对 `notes_dir` 按配置文件所在目录解析；实际项目配置由 Git 忽略。完整规则见[配置指南](docs/CONFIGURATION.md)。
-
-```bash
-python3 -S skills/framenote/scripts/headless.py config
-python3 -S skills/framenote/scripts/headless.py notes-dir
-python3 -S skills/framenote/scripts/headless.py transcribe '<视频链接或本地路径>' --out-dir ./my-note --wait 1800
-python3 -S skills/framenote/scripts/headless.py transcript TASK_ID --start 30 --end 90 --limit 200
-python3 -S skills/framenote/scripts/headless.py frames TASK_ID --timestamps 30 90 --out-dir ./my-note
-python3 -S skills/framenote/scripts/headless.py fetch TASK_ID --out-dir ./my-note --download-video
-```
-
-`tasks` 分页查找旧任务；`status`、`wait`、`cancel` 管理任务；`artifacts` 列出材料入口。转录每页最多 500 段，单次抽帧最多 24 张。Agent 读取下载到本机的转写与实际截图，再组织笔记。
-
-视频自动取回默认关闭。配置 `download_video: true` 或设置 `FRAMENOTE_DOWNLOAD_VIDEO=true` 开启自动取回；`--download-video` / `--no-download-video` 覆盖单次执行。视频保存为 `materials/video.*`，信息记录在 `bundle.json`；重复取回会校验本地文件并通过 ETag 复用。视频沿用服务端已获取的画质；分离音轨按需合并为 MP4，源素材保留。
-
-## 阅读材料
-
-```text
-my-note/
-├── notes.md
-├── chapters-transcript.md
-└── materials/
-    ├── frames/
-    ├── frames.json
-    ├── transcript.json
-    ├── transcript.md
-    ├── transcript.srt
-    ├── asr.raw.json
-    ├── metadata.json
-    ├── bundle.json
-    ├── video.*                 # 开启取回时保存
-    └── corrections.md
-```
-
---out-dir 表示笔记根目录。frames.json.relative_path 相对该根目录，重取材料保留阅读稿与 corrections.md。原始转录和截图是整理依据，Skill 生成带章节时间、截图、原稿引用的阅读文档。
-
-YouTube 支持普通视频、youtu.be 短链、Shorts、嵌入和已结束直播的视频链接；含播放列表参数的链接只处理当前视频。服务所在机器需能访问 YouTube，并安装 Deno ≥2.3 或 Node.js ≥22；详见[部署指南](docs/DEPLOYMENT.md#youtube-下载依赖)。
-
-B站保留 ?p=N，默认第1P；启用 Galaxy 时，抖音直接使用 Galaxy API，B站和 YouTube 在平台下载失败时使用 Galaxy 回退；关闭时各平台使用原生下载。本地视频流式上传，上限默认2GiB。源视频保留在服务 workspace/tasks/TASK_ID/，可继续截图。SenseVoice 时间为 VAD 语音片段区间，章节边界按近似范围表达。
-
-Galaxy 外部 API 使用 [bhwa233/galaxy-downloader](https://github.com/bhwa233/galaxy-downloader) 项目的后端 API。通过 `FRAMENOTE_GALAXY_ENABLED=true` 启用抖音直接获取及 B站、YouTube 的平台下载失败回退。`FRAMENOTE_GALAXY_BASE_URL` 配置后端 API 基址。Galaxy 返回的 HLS 会通过 ffmpeg 下载封装；服务检查实际轨道并按需保留独立音轨，供转写和视频取回使用。
-
-单 worker 串行转录，JSON 持久化与文件锁保证 workspace 独占。排队任务重启继续，处理中断标记 failed/interrupted并保留已落盘材料；取消等待进程组清理后再处理下一任务。
-
-## 配置、扩展与开发
-
-[配置项](docs/CONFIGURATION.md)、[模型来源与准备](docs/MODELS.md)、[ASR 开发者接口](docs/ASR.md)、[部署/升级/备份](docs/DEPLOYMENT.md)。新增后端通过实现协议、解析配置、登记工厂和契约测试接入；Pipeline 消费带时间段落的规范结果。
-
-```bash
-python -m pip install -e '.[dev]'
-python -m pytest -q
-python -m mypy framenote
-python -m build
-```
-
-CI 检查 Python 3.10/3.12、发行物内容与源码目录外的基础安装；两台真实机器的完整 ASR 安装/推理单独记录。
-
-FrameNote 由 [like-attract/video-to-note](https://github.com/like-attract/video-to-note) 无界面实验版本提取，保留 MIT [LICENSE](LICENSE) 和 [NOTICE](NOTICE)。模型与运行依赖分别保留上游来源与许可。当前范围见 [SCOPE](docs/SCOPE.md)，早期材料验收事实见 [VALIDATION](docs/VALIDATION.md)。
+FrameNote 从 [video-to-note](https://github.com/like-attract/video-to-note) 的无界面实验版本提取，保留 MIT [许可](LICENSE)和[上游归属声明](NOTICE)。模型与运行依赖使用各自的上游许可，参见[模型来源与许可](docs/MODELS.md#来源与许可)。
