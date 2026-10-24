@@ -152,7 +152,6 @@ def test_no_ui_and_lan_access(tmp_path):
     with TestClient(app, client=("192.168.31.42", 50000)) as client:
         assert client.get("/").status_code == 404
         assert client.get("/docs").status_code == 404
-        assert client.post("/mcp", json={"method":"tools/list"}).status_code == 404
         assert client.get("/api/health").json()["mode"] == "headless"
         assert client.post("/api/transcribe", json={"video_url": "https://example.com"}).status_code == 422
         assert client.get("/api/health").status_code == 200

@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "framenote",
+  "version": "0.1.0",
+  "description": "通过 FrameNote 获取视频转录与截图，在 ChatGPT 中整理章节笔记并保存到 Space。",
+  "author": {"name": "LetTTGACO"},
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "FrameNote",
+        "shortDescription": "总结视频，保存到 Space",
+        "longDescription": "获取 B站、抖音和 YouTube 视频材料，阅读完整转录与关键画面，生成带来源和时间的章节笔记，并保存到指定 ChatGPT Space。支持复用历史视频任务继续讨论。",
+        "developerName": "LetTTGACO",
+        "category": "Productivity",
+        "capabilities": [],
+        "defaultPrompt": "总结这个视频，整理章节和关键画面，保存到我的 ChatGPT Space。"
+      }
+    }
+  }
+}

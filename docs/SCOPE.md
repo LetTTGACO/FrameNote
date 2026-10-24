@@ -4,12 +4,14 @@
 
 ## 服务、客户端与 Agent
 
-FrameNote 将视频整理过程分为三个部分：
+FrameNote 的各部分分工如下：
 
 | 部分 | 职责 | 主要位置 |
 | --- | --- | --- |
 | HTTP 服务 | 获取并保留媒体、生成转录、持久化任务、独立抽帧 | `framenote/` |
 | 标准库客户端 | 提交任务、查询状态、下载转录、截图和可选视频 | `skills/framenote/scripts/headless.py` |
+| MCP 接口 | 链接提交、任务查询、分页转录与原生图片 | `framenote/service_mcp.py` |
+| ChatGPT 插件工作流 | 使用 MCP 阅读视频材料，将总结保存到 Space | `plugins/framenote/` |
 | Agent 工作流 | 阅读完整转录和实际截图，组织章节，撰写笔记与分章原稿 | `skills/framenote/SKILL.md` |
 
 服务负责生成材料，Agent 根据材料撰写两份阅读文档。每个任务的笔记目录包含 `notes.md`、`chapters-transcript.md` 和 `materials/`。重新取回材料会保留阅读文档和纠错记录；视频自动取回默认关闭。

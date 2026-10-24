@@ -16,6 +16,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, model_validator
 
 from .frame_extractor import extract_frame
+from .service_mcp import create_mcp
 from .service_pipeline import Pipeline, platform_url
 from .service_settings import Settings
 from .service_video import prepare_video, retained_video
@@ -69,11 +70,14 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
             await asyncio.to_thread(backend.health)
             await jobs.start()
             try:
-                yield
+                async with remote_mcp.session_manager.run():
+                    yield
             finally:
                 await jobs.stop()
 
     app = FastAPI(title="FrameNote", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    remote_mcp = create_mcp(app=app)
+    mcp_app = remote_mcp.streamable_http_app()
     app.state.store, app.state.jobs, app.state.backend = store, jobs, backend
 
     @app.exception_handler(KeyError)
@@ -240,6 +244,7 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
             raise HTTPException(404, "Artifact not found")
         return FileResponse(path, filename=name)
 
+    app.mount("/", mcp_app)
     return app
 
 

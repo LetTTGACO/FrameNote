@@ -31,15 +31,17 @@ def test_wheel_and_sdist_contents(distributions):
     with zipfile.ZipFile(wheel) as archive:
         names=archive.namelist()
         assert "framenote/asr/models.lock.json" in names
-        assert "framenote/service_mcp.py" not in names
+        assert "framenote/service_mcp.py" in names
         metadata = archive.read(next(name for name in names if name.endswith(".dist-info/METADATA"))).decode()
-        assert "Requires-Dist: mcp" not in metadata
+        assert "Requires-Dist: mcp" in metadata
         assert any(name.endswith("/licenses/LICENSE") for name in names)
         assert any(name.endswith("/licenses/NOTICE") for name in names)
     with tarfile.open(source) as archive:
         names={name.split("/",1)[1] for name in archive.getnames() if "/" in name}
         expected={"skills/framenote/SKILL.md","skills/framenote/scripts/headless.py","deploy/framenote.service",
-                  "deploy/service.env.example",".framenote.example.json","README.md","docs/MODELS.md","docs/ASR.md","LICENSE","NOTICE"}
+                  "deploy/service.env.example",".framenote.example.json","README.md","docs/MODELS.md","docs/ASR.md","LICENSE","NOTICE",
+                  "docs/MCP.md", "plugins/framenote/plugin.json", "plugins/framenote/skills/video-to-space/SKILL.md",
+                  "plugins/framenote/skills/video-to-space/agents/openai.yaml"}
         assert expected <= names,expected-names
         assert not any(part in {".local",".superpowers","workspace","models"} for name in names for part in Path(name).parts)
         assert not any(name.startswith("docs/superpowers/") for name in names)
@@ -66,6 +68,8 @@ def test_installed_wheel_runs_outside_checkout(distributions,tmp_path):
     assert Path(probe["module"]).is_relative_to(venv)
     assert probe["counts"]=={"sensevoice":6,"vad":4}
     assert probe["heavy"]==[]
+    mcp_probe = "import asyncio; from framenote.service_mcp import create_mcp; print(len(asyncio.run(create_mcp().list_tools())))"
+    assert checked([str(python), "-c", mcp_probe], cwd=outside, env=env).stdout.strip() == "9"
     checked([str(python),"-m","framenote.asr_sensevoice","--help"],cwd=outside,env=env)
     child=subprocess.run([str(python),"-m","framenote.models","verify","--out","models"],cwd=outside,env=env,capture_output=True,text=True)
     assert child.returncode==1

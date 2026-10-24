@@ -1,6 +1,6 @@
 # FrameNote
 
-FrameNote 可以将 B站、抖音、YouTube 或本地视频整理成可阅读、可追溯的章节笔记。HTTP 服务获取视频、生成转录并按需截图；Agent 通过 Skill 读取材料，撰写章节笔记和分章原稿。
+FrameNote 可以将 B站、抖音、YouTube 或本地视频整理成可阅读、可追溯的章节笔记。HTTP 服务获取视频、生成转录并按需截图；Agent 通过 Skill 客户端或 MCP 读取材料，撰写章节笔记和分章原稿。
 
 从本页完成服务启动和 Skill 配置后，你可以发送视频链接开始整理。服务器运维见[部署指南](docs/DEPLOYMENT.md)，日常命令见[使用指南](docs/USAGE.md)。
 
@@ -151,6 +151,10 @@ python3 -S skills/framenote/scripts/headless.py transcribe 'VIDEO_SOURCE' \
 视频自动取回默认关闭。转录分页、任务管理、截图和视频取回见[使用指南](docs/USAGE.md)。
 
 ## 继续阅读
+
+在 ChatGPT 网页和手机端使用时，通过 OpenAI Secure MCP Tunnel 连接服务器的
+`http://127.0.0.1:18121/mcp`，创建私有插件。`plugins/framenote/` 中的 Skill
+指导 ChatGPT 将章节笔记保存到指定 Space。连接、工具与插件配置见 [MCP 指南](docs/MCP.md)。
 
 按你要完成的任务选择文档：
 
