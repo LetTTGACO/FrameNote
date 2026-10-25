@@ -21,10 +21,10 @@ from .service_pipeline import Pipeline, platform_url
 from .service_settings import Settings
 from .service_video import prepare_video, retained_video
 from .jobs import Jobs
+from .materials import is_material_name, material_names
 from .task_store import TaskStore, atomic_json, public_error
 from .transcript import MaterialError, TranscriptSegment, read_transcript, segments_to_prompt, segments_to_srt
 
-ARTIFACT_NAMES = {"metadata.json", "transcript.json", "transcript.md", "transcript.srt", "asr.raw.json", "frames.json"}
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".mpeg", ".mpg", ".ts"}
 
 
@@ -176,8 +176,9 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
                          offset: int = Query(0, ge=0), limit: int = Query(200, ge=1, le=500),
                          start: float = Query(0, ge=0, allow_inf_nan=False), end: float | None = Query(None, ge=0, allow_inf_nan=False)):
         store.get(task_id)
-        path = store.directory(task_id) / "transcript.json"
-        if not path.is_file():
+        directory = store.directory(task_id)
+        path = directory / "transcript.json"
+        if directory.resolve().parent != store.root or "transcript.json" not in material_names(directory):
             raise HTTPException(409, "Transcript is not ready")
         if end is not None and end < start:
             raise HTTPException(422, "end must be >= start")
@@ -231,16 +232,18 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
     async def artifacts(task_id: str):
         task = store.get(task_id)
         directory = store.directory(task_id)
-        return {"schema_version": 2, "task_id": task_id, "downloads": public_task(task)["downloads"],
+        names = material_names(directory) if directory.resolve().parent == store.root else []
+        return {"schema_version": task.get("material_schema_version", 2), "task_id": task_id, "downloads": public_task(task)["downloads"],
                 "artifacts": [{"name": name, "bytes": (directory / name).stat().st_size,
                                 "url": f"/api/task/{task_id}/artifacts/{name}"}
-                               for name in sorted(ARTIFACT_NAMES) if (directory / name).is_file()]}
+                               for name in names]}
 
     @app.get("/api/task/{task_id}/artifacts/{name}")
     async def artifact(task_id: str, name: str):
         store.get(task_id)
-        path = store.directory(task_id) / name
-        if name not in ARTIFACT_NAMES or not path.is_file():
+        directory = store.directory(task_id)
+        path = directory / name
+        if not is_material_name(name) or directory.resolve().parent != store.root or name not in material_names(directory):
             raise HTTPException(404, "Artifact not found")
         return FileResponse(path, filename=name)
 

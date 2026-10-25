@@ -96,3 +96,21 @@ def test_v2_roundtrip_keeps_provenance_and_raw_identifier(tmp_path):
     path.write_text(json.dumps(payload))
     assert read_transcript(path) == payload
     assert payload["text"] == "first\nsecond"
+
+
+@pytest.mark.parametrize('version', [1, 2])
+def test_v1_v2_reads_keep_original_bytes(tmp_path, version):
+    path = tmp_path / 'transcript.json'
+    raw = ('{ "schema_version": %s, "duration": 2, "segments": [{"start":0,"end":1,"text":"hello"}] }\n' % version).encode()
+    path.write_bytes(raw)
+    assert read_transcript(path)['segments'] == [{'start': 0, 'end': 1, 'text': 'hello'}]
+    assert path.read_bytes() == raw
+
+
+def test_unknown_material_version_rejected_without_rewrite(tmp_path):
+    path = tmp_path / 'transcript.json'
+    path.write_bytes(b'{ "schema_version": 4 }\n')
+    before = path.read_bytes()
+    with pytest.raises(MaterialError, match='Unsupported'):
+        read_transcript(path)
+    assert path.read_bytes() == before

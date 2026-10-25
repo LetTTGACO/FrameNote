@@ -7,11 +7,12 @@
 先按[贡献指南](../AGENTS.md#set-up-a-development-environment)建立开发环境，并阅读以下代码：
 
 - [ASR 类型与协议](../framenote/asr/types.py)：后端输入、输出与校验。
-- [流水线](../framenote/service_pipeline.py)：音轨准备、进度映射与材料发布。
+- [流水线](../framenote/service_pipeline.py)：音轨准备与进度映射。
+- [公共材料发布层](../framenote/materials.py)：原件边界、原子发布和转录导出。
 - [SenseVoice 适配器](../framenote/asr/sensevoice.py)：可参考的隔离推理实现。
 - [契约测试](../tests/test_asr_contract.py)和[流水线测试](../tests/test_pipeline.py)：合法结果、失败和取消行为。
 
-`Pipeline` 负责规范音轨和材料发布。把模型检查、依赖加载、推理协议和原始结果映射封装在后端中。
+`Pipeline` 负责规范音轨和编排材料发布。把模型检查、依赖加载、推理协议和原始结果映射封装在后端中。
 
 ## 实现并登记后端
 
@@ -93,9 +94,13 @@
 
 SenseVoice 的全部默认资产匹配模型锁时，`revision` 使用 `lock-sha256:` 加模型锁内容的 SHA-256。逐文件来源和固定提交见[模型清单](MODELS.md#固定资产)。公开参数使用脱敏标识。
 
-`raw_path` 必须指向本任务目录内真实存在的文件；解析符号链接后仍须满足这个边界。流水线按原字节发布为 `asr.raw.json`，不依赖原始文件的键名。
+`raw_path` 必须指向本任务目录内真实存在的文件；解析符号链接后仍须满足这个边界。公共材料发布器 `publish_asr` 按原字节发布为 `asr.raw.json`，不依赖原始文件的键名。
 
-规范转录使用 `schema_version=2`，`raw_artifact` 只保存材料名。读取接口兼容 v1，且不修改原文件；未知版本和无效段落分别以 `unsupported_material_version` 和 `invalid_transcript` 报错。
+ASR 规范转录保持 `schema_version=2`，`ASRResult` 和 `result_to_payload(result, duration=...)` 的契约不变；`raw_artifact` 只保存材料名。公共材料发布层分别接收 ASR 结果和平台字幕，准备 JSON、Markdown、SRT 及原件，发布前后检查取消；调用方在全部输出成功后才把任务标记为完成。
+
+平台字幕使用 transcript v3：`timestamp_kind=subtitle_interval`，`source_kind` 为 `platform_subtitle` 或 `platform_auto_caption`，来源保存为 B站身份、轨道、语言、生成方式、翻译标记、抓取时间和原件 SHA-256。抓取时间未知时为 `null`；空字幕不能作为 ASR 静音结果发布。字幕原件保存为 `subtitle.raw.json`，各候选的 `subtitle-NNNN.raw.json` 和 `subtitle_attempts.json` 继续保留。材料清单版本取任务的 `material_schema_version`，旧任务默认为 2；B站任务清单可以为 v3，而其 ASR 转录仍为 v2。
+
+读取接口兼容 transcript v1、v2 和 v3，v3 校验字幕来源及时间类型，且不修改原文件字节；未知版本和无效段落分别以 `unsupported_material_version` 和 `invalid_transcript` 报错。
 
 ## 编写离线示例后端
 

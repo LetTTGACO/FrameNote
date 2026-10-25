@@ -560,3 +560,73 @@ async def test_stop_during_cancellation_waits_for_term_resistant_child(tmp_path)
             with suppress(ProcessLookupError):
                 os.killpg(child_pid, signal.SIGKILL)
         await jobs.stop()
+
+
+def test_srt_json_pagination_share_subtitle_segments(tmp_path):
+    from framenote.materials import publish_subtitles
+    from framenote.transcript import TranscriptSegment
+    from framenote.subtitles import BilibiliIdentity, SubtitleChoice, SubtitleTrack
+    with client_for(config(tmp_path)) as client:
+        store = client.app.state.store
+        task = store.create(status='completed', material_schema_version=3)
+        task_id = task['task_id']
+        directory = store.directory(task_id)
+        raw = b'{"body":[]}'
+        (directory / 'subtitle-0001.raw.json').write_bytes(raw)
+        identity = BilibiliIdentity('https://www.bilibili.com/video/BV1cfaf6SEA9/?p=1',
+                                    'BV1cfaf6SEA9', 123, 1, 456, 'one', 5., 'title')
+        choice = SubtitleChoice([TranscriptSegment(i, i + 1, f'段落{i}') for i in range(5)],
+                                SubtitleTrack('1', 'zh', False, None), 'subtitle-0001.raw.json', [], {})
+        publish_subtitles(directory, identity, choice, cancelled=lambda: False)
+        before = {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()}
+        params = {'start': 1.5, 'end': 4, 'limit': 1, 'offset': 1}
+        route = f'/api/task/{task_id}/transcript'
+        value = client.get(route, params=params).json()
+        assert value['total_segments'] == 3
+        assert value['segments'] == [{'start': 2, 'end': 3, 'text': '段落2'}]
+        assert value['text'] == '段落2'
+        assert value['timestamp_kind'] == 'subtitle_interval'
+        srt = client.get(route, params={**params, 'output_format': 'srt'}).json()
+        assert srt['segments'] == value['segments']
+        assert srt['content'] == '1\r\n00:00:02,000 --> 00:00:03,000\r\n段落2\r\n'
+        markdown = client.get(route, params={**params, 'output_format': 'markdown'}).json()
+        assert markdown['content'] == '[00:02-00:03] 段落2'
+        assert client.get(f'/api/task/{task_id}/artifacts').json()['schema_version'] == 3
+        assert {p.name: p.read_bytes() for p in directory.iterdir() if p.is_file()} == before
+
+
+def test_artifact_manifest_uses_task_version_and_checks_candidate_boundaries(tmp_path):
+    outside = tmp_path / 'outside.json'
+    outside.write_bytes(b'private')
+    with client_for(config(tmp_path / 'workspace')) as client:
+        store = client.app.state.store
+        task_id = finished_task(store)
+        directory = store.directory(task_id)
+        assert client.get(f'/api/task/{task_id}/artifacts').json()['schema_version'] == 2
+        store.update(task_id, material_schema_version=3)
+        (directory / 'subtitle-0001.raw.json').write_bytes(b'bad candidate')
+        (directory / 'subtitle-10000.raw.json').write_bytes(b'candidate')
+        (directory / 'subtitle-123.raw.json').write_bytes(b'not candidate')
+        (directory / 'subtitle_attempts.json').write_bytes(b'[]')
+        (directory / 'subtitle.raw.json').symlink_to(outside)
+        (directory / 'metadata.json').symlink_to(outside)
+        route = f'/api/task/{task_id}/artifacts'
+        manifest = client.get(route).json()
+        assert manifest['schema_version'] == 3  # Existing transcript stays v1.
+        names = {item['name'] for item in manifest['artifacts']}
+        assert {'subtitle-0001.raw.json', 'subtitle-10000.raw.json', 'subtitle_attempts.json'} <= names
+        assert not {'subtitle-123.raw.json', 'subtitle.raw.json', 'metadata.json', 'task.json'} & names
+        assert client.get(route + '/subtitle-0001.raw.json').content == b'bad candidate'
+        for name in ['subtitle.raw.json', 'metadata.json', 'subtitle-123.raw.json', 'task.json']:
+            assert client.get(route + '/' + name).status_code == 404
+        assert outside.read_bytes() == b'private'
+
+
+def test_transcript_route_rejects_external_symlink(tmp_path):
+    outside = tmp_path / 'outside.json'
+    outside.write_text(json.dumps({'duration': 1, 'segments': [{'start': 0, 'end': 1, 'text': 'private'}]}))
+    with client_for(config(tmp_path / 'workspace')) as client:
+        task = client.app.state.store.create(status='completed')
+        task_id = task['task_id']
+        (client.app.state.store.directory(task_id) / 'transcript.json').symlink_to(outside)
+        assert client.get(f'/api/task/{task_id}/transcript').status_code == 409

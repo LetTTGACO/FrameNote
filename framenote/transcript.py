@@ -1,8 +1,10 @@
 from __future__ import annotations
 from dataclasses import asdict, dataclass
-from typing import Literal, Sequence, TypeAlias, cast
+from typing import Any, Literal, Sequence, TypeAlias, cast
+from datetime import datetime
 import json
 import math
+import re
 from pathlib import Path
 
 JSONValue: TypeAlias = bool | int | float | str | None | list["JSONValue"] | dict[str, "JSONValue"]
@@ -53,13 +55,63 @@ def validate_segments(segments: Sequence[TranscriptSegment], *, duration: float)
         previous = start
 
 
+def validate_subtitle_payload(payload: dict[str, Any]) -> None:
+    """Validate public subtitle metadata without inventing ASR provenance."""
+    if payload.get('timestamp_kind') != 'subtitle_interval':
+        raise ValueError('Subtitle timestamp_kind must be subtitle_interval')
+    if payload.get('source_kind') not in {'platform_subtitle', 'platform_auto_caption'}:
+        raise ValueError('Invalid subtitle source_kind')
+    if any(key in payload for key in ('engine', 'model', 'asr_run')):
+        raise ValueError('Subtitle material cannot contain ASR metadata')
+    if not payload['segments'] or any(not item['text'].strip() for item in payload['segments']):
+        raise ValueError('Subtitle segments must contain text')
+    if not isinstance(payload['text'], str):
+        raise ValueError('Subtitle text must be a string')
+    warnings = payload['warnings']
+    if not isinstance(warnings, list) or any(not isinstance(item, str) or item == 'no_speech_detected' for item in warnings):
+        raise ValueError('Invalid subtitle warnings')
+    metrics = payload['metrics']
+    if not isinstance(metrics, dict) or any(not isinstance(key, str) or not finite_number(value) or value < 0
+                                           for key, value in metrics.items()):
+        raise ValueError('Invalid subtitle metrics')
+    if payload['raw_artifact'] != 'subtitle.raw.json':
+        raise ValueError('Invalid subtitle raw artifact')
+    provenance = payload['provenance']
+    if not isinstance(provenance, dict) or provenance['provider'] != 'bilibili':
+        raise ValueError('Invalid subtitle provider')
+    for key in ('track_id', 'language', 'generation'):
+        if not isinstance(provenance[key], str) or not provenance[key]:
+            raise ValueError('Invalid subtitle ' + key)
+    if provenance['is_translation'] is not None and type(provenance['is_translation']) is not bool:
+        raise ValueError('Invalid subtitle is_translation')
+    if not isinstance(provenance['sha256'], str) or re.fullmatch(r'[0-9a-f]{64}', provenance['sha256']) is None:
+        raise ValueError('Invalid subtitle SHA-256')
+    fetched_at = provenance['fetched_at']
+    if fetched_at is not None:
+        if not isinstance(fetched_at, str) or datetime.fromisoformat(fetched_at.replace('Z', '+00:00')).utcoffset() is None:
+            raise ValueError('Subtitle fetched_at must include a timezone')
+    identity = provenance['identity']
+    if not isinstance(identity, dict):
+        raise ValueError('Subtitle identity must be an object')
+    for key in ('canonical_url', 'bvid', 'part', 'title'):
+        if not isinstance(identity[key], str):
+            raise ValueError('Invalid subtitle identity ' + key)
+    for key in ('aid', 'page', 'cid'):
+        if type(identity[key]) is not int or identity[key] <= 0:
+            raise ValueError('Invalid subtitle identity ' + key)
+    if not finite_number(identity['duration']) or identity['duration'] != payload['duration']:
+        raise ValueError('Subtitle identity duration must match transcript')
+    if identity.get('original_language') is not None and not isinstance(identity['original_language'], str):
+        raise ValueError('Invalid subtitle original_language')
+
+
 def read_transcript(path: Path) -> dict[str, JSONValue]:
     try:
         payload = json.loads(path.read_text(encoding="utf-8"))
         if not isinstance(payload, dict):
             raise ValueError("Transcript must be an object")
         version = payload.get("schema_version", 1)
-        if type(version) is not int or version not in {1, 2}:
+        if type(version) is not int or version not in {1, 2, 3}:
             raise MaterialError("unsupported_material_version", "Unsupported transcript schema version")
         items = payload["segments"]
         if not isinstance(items, list):
@@ -67,6 +119,11 @@ def read_transcript(path: Path) -> dict[str, JSONValue]:
         segments = [TranscriptSegment(item["start"], item["end"], item["text"]) for item in items]
         duration = payload["duration"]
         validate_segments(segments, duration=duration)
+        if version == 3:
+            validate_subtitle_payload(payload)
+            raw = path.parent / payload['raw_artifact']
+            if raw.resolve().parent != path.parent.resolve():
+                raise ValueError('Subtitle raw artifact must belong to this task')
         payload["segments"] = [{"start": segment.start, "end": min(segment.end, duration), "text": segment.text} for segment in segments]
         payload.setdefault("text", "\n".join(segment.text for segment in segments))
         payload.setdefault("provenance", {"backend": "legacy_unknown", "model": payload.get("engine", "legacy_unknown"),
@@ -76,7 +133,7 @@ def read_transcript(path: Path) -> dict[str, JSONValue]:
         return cast(dict[str, JSONValue], payload)
     except MaterialError:
         raise
-    except (ValueError, TypeError, KeyError, AttributeError, OverflowError) as error:
+    except (ValueError, TypeError, KeyError, AttributeError, OverflowError, RuntimeError) as error:
         raise MaterialError("invalid_transcript", "Invalid transcript: " + str(error)) from error
 
 

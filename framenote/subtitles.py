@@ -6,6 +6,7 @@ from like-attract/video-to-note, pinned source and MIT attribution in NOTICE.
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+from datetime import datetime, timezone
 import json
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal, Sequence
@@ -62,6 +63,7 @@ class SubtitleChoice:
     raw_artifact: str
     warnings: list[str]
     metrics: dict[str, float]
+    fetched_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -96,7 +98,7 @@ class SubtitleOutcome:
             if identity is None or not segments:
                 raise ValueError('Subtitle choice requires identity and segments')
             validate_segments(segments, duration=identity.duration)
-            choice = SubtitleChoice(segments, SubtitleTrack(**track), value['raw_artifact'], value['warnings'], value['metrics'])
+            choice = SubtitleChoice(segments, SubtitleTrack(**track), value['raw_artifact'], value['warnings'], value['metrics'], value.get('fetched_at'))
         return cls(identity, choice, [SubtitleAttempt(**item) for item in payload['attempts']], payload['fallback_reason'])
 
 
@@ -168,6 +170,7 @@ def fetch_bilibili_subtitles(url: str, directory: Path, *, client: BilibiliClien
     for index, track in enumerate(tracks, 1):
         try:
             raw = client.download(track, identity)
+            fetched_at = datetime.now(timezone.utc).isoformat()
         except BilibiliHTTPError as error:
             last_error = error.code
             attempts.append(SubtitleAttempt('download', track.track_id, 'error', error.code))
@@ -185,6 +188,6 @@ def fetch_bilibili_subtitles(url: str, directory: Path, *, client: BilibiliClien
         metrics, warnings = _metrics(segments, identity.duration)
         (directory / 'subtitle.raw.json').write_bytes(raw)
         attempts.append(SubtitleAttempt('parse', track.track_id, 'selected', None, artifact))
-        choice = SubtitleChoice(segments, track, 'subtitle.raw.json', warnings, metrics)
+        choice = SubtitleChoice(segments, track, 'subtitle.raw.json', warnings, metrics, fetched_at)
         return SubtitleOutcome(identity, choice, attempts, None)
     return SubtitleOutcome(identity, None, attempts, last_error or 'all_candidates_invalid')

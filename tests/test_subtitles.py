@@ -282,3 +282,19 @@ def test_supported_long_numeric_inputs_have_no_arbitrary_product_limit(kind):
         http.view['data']['aid'] = value
         identity = BilibiliClient(http).resolve('av' + str(value))
         assert identity.aid == value
+
+
+def test_body_acquisition_timestamp_survives_worker_roundtrip(identity, tmp_path):
+    from datetime import datetime, timezone
+    before = datetime.now(timezone.utc)
+    client = FakeClient(identity, [SubtitleTrack('1', 'zh', False, None)],
+                        {'1': raw({'from': 0, 'to': 1, 'content': 'hello'})})
+    outcome = fetch_bilibili_subtitles(URL, tmp_path, client=client)
+    after = datetime.now(timezone.utc)
+    acquired = datetime.fromisoformat(outcome.choice.fetched_at)
+    assert before <= acquired <= after
+    restored = SubtitleOutcome.from_payload(json.loads(json.dumps(outcome.to_payload())))
+    assert restored.choice.fetched_at == outcome.choice.fetched_at
+    payload = outcome.to_payload()
+    del payload['choice']['fetched_at']
+    assert SubtitleOutcome.from_payload(payload).choice.fetched_at is None
