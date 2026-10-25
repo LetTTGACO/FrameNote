@@ -372,3 +372,116 @@ def test_body_cancellation_propagates_and_closes_response(transport):
         BilibiliHTTP(None, deadline=160).get_json('https://api.bilibili.com/x')
     assert response.closed
     assert len(transport.requests) == 1 and transport.sleeps == []
+
+
+def test_absolute_deadline_interrupts_header_drip_before_open_returns(transport):
+    from http.client import HTTPResponse
+    import signal
+    import socket
+    import threading
+    import time
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    receiver, sender = socket.socketpair()
+    stop = threading.Event()
+    sender.sendall(b'HTTP/1.0 200 OK\r\nX-Slow: ')
+    response = HTTPResponse(receiver)
+    def opening(request, timeout):
+        transport.requests.append(request)
+        try:
+            response.begin()
+        except BaseException:
+            response.close()
+            raise
+        return response
+    transport.open = opening
+    def drip_headers():
+        try:
+            for _ in range(30):
+                if stop.wait(0.02):
+                    return
+                sender.sendall(b'x')
+            sender.sendall(b'\r\n\r\n{}')
+        except OSError:
+            pass
+        finally:
+            sender.close()
+    producer = threading.Thread(target=drip_headers, daemon=True)
+    producer.start()
+    started = time.perf_counter()
+    try:
+        with pytest.raises(BilibiliHTTPError) as error:
+            BilibiliHTTP(None, deadline=100.05).get_json('https://api.bilibili.com/x')
+        assert error.value.code == 'deadline_exceeded'
+        assert signal.getsignal(signal.SIGALRM) is previous_handler
+        assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+        assert time.perf_counter() - started < 0.3
+        assert response.isclosed()
+        assert len(transport.requests) == 1 and transport.sleeps == []
+    finally:
+        stop.set()
+        receiver.close()
+        producer.join(timeout=1)
+
+
+def test_strict_requests_reject_off_main_thread_before_network(transport):
+    from concurrent.futures import ThreadPoolExecutor
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(BilibiliHTTP(None, deadline=160).get_json, 'https://api.bilibili.com/x')
+        with pytest.raises(RuntimeError, match='isolated acquisition'):
+            future.result(timeout=1)
+    assert transport.requests == []
+
+
+def test_strict_requests_reject_unsupported_timer_context_before_network(transport, monkeypatch):
+    import signal
+    monkeypatch.delattr(signal, 'setitimer')
+    with pytest.raises(RuntimeError, match='isolated acquisition'):
+        BilibiliHTTP(None, deadline=160).get_json('https://api.bilibili.com/x')
+    assert transport.requests == []
+
+
+def test_strict_requests_do_not_replace_active_unrelated_timer(transport):
+    import signal
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    handler = lambda *args: None
+    signal.signal(signal.SIGALRM, handler)
+    signal.setitimer(signal.ITIMER_REAL, 10)
+    try:
+        with pytest.raises(RuntimeError, match='active timer'):
+            BilibiliHTTP(None, deadline=160).get_json('https://api.bilibili.com/x')
+        assert transport.requests == []
+        assert signal.getsignal(signal.SIGALRM) is handler
+        assert signal.getitimer(signal.ITIMER_REAL)[0] > 9
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+@pytest.mark.parametrize('outcome', [Response(b'{}'), asyncio.CancelledError(), urllib.error.URLError('secret')])
+def test_attempt_guard_restores_previous_signal_state_on_exit(transport, outcome):
+    import signal
+    previous_handler = signal.getsignal(signal.SIGALRM)
+    handler = lambda *args: None
+    signal.signal(signal.SIGALRM, handler)
+    transport.outcomes = [outcome] if not isinstance(outcome, urllib.error.URLError) else [outcome] * 3
+    try:
+        try:
+            BilibiliHTTP(None, deadline=160).get_json('https://api.bilibili.com/x')
+        except (asyncio.CancelledError, BilibiliHTTPError):
+            pass
+        assert signal.getsignal(signal.SIGALRM) is handler
+        assert signal.getitimer(signal.ITIMER_REAL) == (0.0, 0.0)
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous_handler)
+
+
+def test_strict_requests_reject_blocked_alarm_before_network(transport):
+    import signal
+    previous_mask = signal.pthread_sigmask(signal.SIG_BLOCK, {signal.SIGALRM})
+    try:
+        with pytest.raises(RuntimeError, match='blocked'):
+            BilibiliHTTP(None, deadline=160).get_json('https://api.bilibili.com/x')
+        assert transport.requests == []
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)

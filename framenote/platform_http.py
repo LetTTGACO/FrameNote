@@ -1,15 +1,16 @@
 """Synchronous, bounded Bilibili requests for isolated acquisition workers."""
 from __future__ import annotations
 
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from http.client import HTTPException, HTTPResponse
 import json
 import math
-import socket
+import signal
 import threading
 import time
-from typing import Any, cast
+from typing import Any, Iterator, cast
 import urllib.error
 import urllib.request
 from urllib.parse import urlencode, urljoin, urlsplit, urlunsplit
@@ -67,77 +68,44 @@ def _remaining(deadline: float) -> float:
     return remaining
 
 
-class _DeadlineResponse:
-    """Keep the opening budget for all body reads, including a drip stream."""
+@contextmanager
+def _attempt_guard(deadline: float) -> Iterator[None]:
+    """Interrupt the entire request, including urllib's blocking header read."""
+    if (threading.current_thread() is not threading.main_thread()
+            or not all(hasattr(signal, name) for name in ('SIGALRM', 'ITIMER_REAL', 'setitimer', 'getitimer', 'pthread_sigmask'))):
+        raise RuntimeError('BilibiliHTTP requires the isolated acquisition subprocess main thread with POSIX timers')
+    if signal.SIGALRM in signal.pthread_sigmask(signal.SIG_BLOCK, []):
+        raise RuntimeError('BilibiliHTTP cannot enforce its deadline with a blocked SIGALRM')
+    previous_timer = signal.getitimer(signal.ITIMER_REAL)
+    if previous_timer[0] > 0:
+        raise RuntimeError('BilibiliHTTP cannot replace an active timer in the acquisition subprocess')
+    previous_handler = signal.getsignal(signal.SIGALRM)
 
-    def __init__(self, response: HTTPResponse, deadline: float):
-        self._response = response
-        self._deadline = deadline
-        self._expired = threading.Event()
-        # HTTPResponse keeps the live socket here, including HTTPS sockets.
-        self._socket = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+    def expire(signum: int, frame: Any) -> None:
+        raise _error('deadline_exceeded')
+
+    signal.signal(signal.SIGALRM, expire)
+    try:
+        signal.setitimer(signal.ITIMER_REAL, _remaining(deadline))
+        yield
+        _remaining(deadline)
+    finally:
         try:
-            remaining = _remaining(deadline)
-        except BilibiliHTTPError:
-            response.close()
-            raise
-        self._timer = threading.Timer(remaining, self._abort)
-        self._timer.daemon = True
-        self._timer.start()
+            signal.setitimer(signal.ITIMER_REAL, *previous_timer)
+        finally:
+            signal.signal(signal.SIGALRM, previous_handler)
 
-    def _abort(self) -> None:
-        self._expired.set()
-        if self._socket is not None:
-            # close() alone may wait for the buffered reader's lock. shutdown()
-            # interrupts its recv even when chunk framing drips indefinitely.
-            try:
-                self._socket.shutdown(socket.SHUT_RDWR)
-            except OSError:
-                pass
 
-    def _check(self) -> float:
-        if self._expired.is_set():
-            raise _error('deadline_exceeded')
-        return _remaining(self._deadline)
-
-    def read1(self, size: int = -1) -> bytes:
-        remaining = self._check()
-        if self._socket is not None and self._response.fp is not None:
-            self._socket.settimeout(remaining)
-        reader = getattr(self._response, 'read1', self._response.read)
-        try:
-            chunk = reader(min(size, 65536) if size >= 0 else 65536)
-        except (OSError, HTTPException):
-            self._check()
-            raise
-        self._check()
+def _read_body(response: HTTPResponse, deadline: float) -> bytes:
+    chunks: list[bytes] = []
+    reader = getattr(response, 'read1', response.read)
+    while True:
+        _remaining(deadline)
+        chunk = reader(65536)
+        _remaining(deadline)
         if not chunk:
-            self._timer.cancel()
-        return cast(bytes, chunk)
-
-    def read(self, size: int = -1) -> bytes:
-        chunks: list[bytes] = []
-        left = size
-        self._check()
-        while left != 0:
-            chunk = self.read1(left)
-            if not chunk:
-                break
-            chunks.append(chunk)
-            if left > 0:
-                left -= len(chunk)
-        self._check()
-        return b''.join(chunks)
-
-    def close(self) -> None:
-        self._timer.cancel()
-        self._response.close()
-
-    def __enter__(self) -> _DeadlineResponse:
-        return self
-
-    def __exit__(self, *args: Any) -> None:
-        self.close()
+            return b''.join(chunks)
+        chunks.append(chunk)
 
 
 def _http_error(exc: urllib.error.HTTPError) -> BilibiliHTTPError:
@@ -202,6 +170,8 @@ def open_bilibili(request: urllib.request.Request, *, timeout: float) -> HTTPRes
 
 
 class BilibiliHTTP:
+    """Strict requests run directly on the isolated POSIX acquisition worker main thread."""
+
     def __init__(self, credentials: BilibiliCredentials | None, *, deadline: float):
         self._credentials = credentials
         self._deadline = deadline
@@ -214,9 +184,9 @@ class BilibiliHTTP:
         for attempt in range(3):
             try:
                 attempt_deadline = min(self._deadline, time.monotonic() + 20)
-                response = open_bilibili(urllib.request.Request(url, headers=headers), timeout=_remaining(attempt_deadline))
-                with _DeadlineResponse(response, attempt_deadline) as bounded_response:
-                    body = bounded_response.read()
+                with _attempt_guard(attempt_deadline):
+                    with open_bilibili(urllib.request.Request(url, headers=headers), timeout=_remaining(attempt_deadline)) as response:
+                        body = _read_body(response, attempt_deadline)
                 _remaining(self._deadline)
                 return body
             except (urllib.error.URLError, OSError, HTTPException):
