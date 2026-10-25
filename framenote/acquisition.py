@@ -53,6 +53,7 @@ class MediaDownloader:
         self.work_dir.mkdir(parents=True, exist_ok=True)
         self._douyin_media_cache: dict[str, dict[str, Any]] = {}
         self._bili_view_cache: dict[str, dict[str, Any]] = {}
+        self.source_has_audio: bool | None = None
 
     @staticmethod
     def detect_source(value: str, allow_local: bool=False) -> MediaSource:
@@ -241,6 +242,8 @@ class MediaDownloader:
         payload = self._bilibili_get_json(self.BILI_PLAYURL_API, params, self._bili_headers(cookie))
         data = payload.get('data') or {}
         dash = data.get('dash') or {}
+        if isinstance(dash.get('audio'), list):
+            self.source_has_audio = bool(dash['audio'])
         streams = (dash.get('audio') if kind == 'audio' else dash.get('video')) or []
         if kind == 'audio':
             ordered = sorted(streams, key=lambda item: int(item.get('bandwidth') or 0), reverse=True)

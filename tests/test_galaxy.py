@@ -306,3 +306,16 @@ async def test_youtube_does_not_call_galaxy_after_success_or_cancellation(tmp_pa
     else:
         with pytest.raises(asyncio.CancelledError):
             await pipeline.acquire(task_id, lambda: upstream == 'aborted')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['video', 'audio'])
+async def test_galaxy_single_track_receives_url_without_cookie(galaxy_server, kind, monkeypatch):
+    downloader, state, directory = galaxy_server
+    monkeypatch.setenv('FRAMENOTE_BILIBILI_CREDENTIALS', '/private/never-forward')
+    asset, metadata = await getattr(downloader, 'download_' + kind)(YOUTUBE, directory)
+    assert asset.is_file()
+    other = 'audio' if kind == 'video' else 'video'
+    assert not any('/media/' + other in request for request in state['requests'])
+    assert parse_qs(urlsplit(state['requests'][0]).query)['url'] == [YOUTUBE]
+    assert 'private' not in json.dumps(metadata) and 'never-forward' not in json.dumps(state['requests'])

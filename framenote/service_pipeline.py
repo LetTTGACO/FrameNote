@@ -5,14 +5,17 @@ import asyncio
 from dataclasses import asdict
 import json
 import os
+import re
 from pathlib import Path
 import sys
 import time
-from typing import Callable
+from typing import Callable, Literal
 from urllib.parse import urlsplit
 
 from .galaxy_downloader import GalaxyDownloader
-from .service_process import run_process
+from .service_process import probe_media, run_process
+from .service_video import fingerprint, media_manifest, prepare_video, retained_file, retained_video
+from .bilibili import _page, _site_url
 from .service_settings import Settings
 from .asr import create_backend
 from .asr.types import ASRBackend, ASRRequest, ASRProgress, ASRError
@@ -37,10 +40,6 @@ def platform_url(value: str) -> str:
         url = bilibili_page_url(url, 1)
     return url
 
-
-async def probe_media(path: Path) -> dict:
-    raw = await run_process(["ffprobe", "-v", "error", "-show_format", "-show_streams", "-of", "json", str(path)], timeout=30)
-    return json.loads(raw)
 
 
 class Pipeline:
@@ -87,11 +86,220 @@ class Pipeline:
             raise asyncio.CancelledError
         return outcome
 
+    def _material(self, directory: Path, name: str) -> dict:
+        path = retained_file(directory, name)
+        if path:
+            try:
+                payload = json.loads(path.read_text())
+                if isinstance(payload, dict):
+                    return payload
+            except (OSError, ValueError):
+                pass
+        return {}
+
+    def _source_identity(self, task: dict, directory: Path) -> dict:
+        return (task.get("source_identity") or self._material(directory, "metadata.json").get("source_identity")
+                or self._material(directory, "transcript.json").get("provenance", {}).get("identity") or {})
+
+    def _acquisition_input_error(self, directory: Path) -> None:
+        error = self._material(directory, "source-resolution.json").get("error")
+        if error and error.get("code") in {"invalid_video_url", "invalid_video_part"}:
+            raise BilibiliInputError(error["code"], error.get("message", "Invalid Bilibili input"))
+        if error and error.get("code") in {"media_identity_mismatch", "media_duration_mismatch"}:
+            raise RuntimeError(error["code"])
+
+    def _galaxy_url(self, directory: Path, url: str) -> str:
+        if MediaDownloader.detect_source(url) != MediaSource.BILIBILI:
+            return url
+        self._acquisition_input_error(directory)
+        if urlsplit(url).hostname == "b23.tv":
+            url = self._material(directory, "source-resolution.json").get("url", "")
+            if not url:
+                raise RuntimeError("Bilibili short-link resolution failed")
+        target = _site_url(url)
+        parsed = urlsplit(target)
+        if not re.fullmatch(r"/video/(?:BV[0-9A-Za-z]{10}|av[1-9][0-9]*)/?", parsed.path):
+            raise BilibiliInputError("invalid_video_url", "Invalid Bilibili video URL")
+        return parsed._replace(query="p=" + str(_page(target) or 1), fragment="").geturl()
+
+    async def acquire_asset(self, task_id: str, url: str, *, kind: Literal["video", "audio"]) -> tuple[Path, dict]:
+        if kind not in {"video", "audio"}:
+            raise ValueError("Unsupported media asset kind")
+        directory = self.store.directory(task_id)
+        task = self.store.get(task_id)
+        if task.get("upload_name"):
+            path = retained_file(directory, task["upload_name"])
+            if path is None:
+                raise RuntimeError("media_unavailable")
+            return path, {"source": "local", "acquisition_provider": "upload"}
+        identity = self._source_identity(task, directory)
+        url = identity.get("canonical_url") or url
+        source = MediaDownloader.detect_source(url)
+        result_path = directory / f"acquisition.{kind}.json"
+        result_path.unlink(missing_ok=True)
+        (directory / "source-resolution.json").unlink(missing_ok=True)
+        if source != MediaSource.DOUYIN or not self.settings.galaxy_enabled:
+            try:
+                await run_process([sys.executable, "-m", "framenote.service_acquire", "--root", str(self.store.root),
+                                   "--task-id", task_id, "--url", url, "--mode", kind],
+                                  timeout=self.settings.process_timeout, log=directory / "acquisition.log",
+                                  env=self._acquisition_environment())
+                result = json.loads(result_path.read_text())
+                asset = retained_file(directory, result["asset"])
+                if asset is None:
+                    raise RuntimeError("media_unavailable")
+                return asset, result["metadata"]
+            except asyncio.CancelledError:
+                raise
+            except BilibiliInputError:
+                raise
+            except Exception:
+                self._acquisition_input_error(directory)
+                if not self.settings.galaxy_enabled:
+                    raise RuntimeError("media_acquisition_failed") from None
+        url = self._galaxy_url(directory, url)
+        downloader = GalaxyDownloader(self.settings.galaxy_base_url)
+        method = downloader.download_video if kind == "video" else downloader.download_audio
+        try:
+            asset, info = await method(url, directory)
+        except Exception:
+            raise RuntimeError("media_acquisition_failed") from None
+        atomic_json(result_path, {"asset": asset.name, "metadata": info})
+        return asset, info
+
+    async def _validate_asset(self, directory: Path, asset: Path, *, kind: str, identity: dict,
+                              duration: object, metadata: dict) -> tuple[dict, float]:
+        retained = retained_file(directory, asset.name)
+        if retained is None or retained.resolve() != asset.resolve():
+            raise RuntimeError("media_unavailable")
+        actual_identity = metadata.get("source_identity") or {}
+        for key in ("bvid", "aid", "page", "cid"):
+            if key in identity and key in actual_identity and identity[key] != actual_identity[key]:
+                raise RuntimeError("media_identity_mismatch")
+        before = fingerprint(asset)
+        try:
+            probe = await probe_media(asset)
+            actual_duration = float(probe.get("format", {}).get("duration") or 0)
+        except Exception:
+            raise RuntimeError("media_invalid") from None
+        if not finite_number(actual_duration) or actual_duration <= 0 or before != fingerprint(asset):
+            raise RuntimeError("media_invalid")
+        if not any(stream.get("codec_type") == kind for stream in probe.get("streams", [])):
+            raise RuntimeError("audio_unavailable" if kind == "audio" else "media_invalid")
+        for reference in (duration, identity.get("duration"), actual_identity.get("duration"), metadata.get("duration")):
+            if reference is not None:
+                if (not isinstance(reference, (int, float)) or not finite_number(reference) or reference <= 0
+                        or abs(actual_duration - reference) > max(3., reference * .01)):
+                    raise RuntimeError("media_duration_mismatch")
+        return probe, actual_duration
+
+    async def prepare_media(self, task_id: str, *, require_audio: bool, cancelled: Callable[[], bool]) -> Path:
+        directory = self.store.directory(task_id)
+        task = self.store.get(task_id)
+        metadata = self._material(directory, "metadata.json")
+        manifest = media_manifest(directory)
+        identity = self._source_identity(task, directory)
+        duration = identity.get("duration") or metadata.get("duration") or task.get("duration")
+        url = identity.get("canonical_url") or task.get("video_url", "")
+
+        def check_cancelled() -> None:
+            if cancelled():
+                raise asyncio.CancelledError
+
+        def publish() -> None:
+            manifest["fingerprints"] = {kind: fingerprint(path) for kind in ("video", "audio", "download")
+                                        if (path := retained_file(directory, manifest.get(kind))) is not None}
+            atomic_json(directory / "media.json", manifest)
+
+        try:
+            check_cancelled()
+            acquisition = self._material(directory, "acquisition.json")
+            video_acquisition = self._material(directory, "acquisition.video.json")
+            video = retained_video(directory, task)
+            info = manifest or acquisition.get("metadata", {})
+            if video is None:
+                video = retained_file(directory, video_acquisition.get("asset"))
+                info = video_acquisition.get("metadata", {})
+            if video is None:
+                video = retained_file(directory, acquisition.get("video"))
+                info = acquisition.get("metadata", {})
+            if video is None:
+                video, info = await self.acquire_asset(task_id, url, kind="video")
+            probe, video_duration = await self._validate_asset(directory, video, kind="video", identity=identity,
+                                                               duration=duration, metadata=info)
+            embedded_audio = any(stream.get("codec_type") == "audio" for stream in probe.get("streams", []))
+            has_audio = True if embedded_audio else info.get("source_has_audio")
+            if type(has_audio) is not bool:
+                has_audio = None
+            if manifest.get("fingerprints", {}).get("video") != fingerprint(video):
+                manifest.pop("download", None)
+            manifest.update(video=video.name, source_identity=identity or info.get("source_identity", {}),
+                            source_has_audio=has_audio, duration=video_duration, duration_verified=True,
+                            identity_evidence=info.get("identity_evidence", "unknown"))
+            # Retain verified video even if a later audio acquisition is interrupted.
+            publish()
+            check_cancelled()
+            if not require_audio or embedded_audio:
+                if embedded_audio:
+                    manifest["download"] = video.name
+                    publish()
+                return video
+            audio_acquisition = self._material(directory, "acquisition.audio.json")
+            audio = None
+            audio_info: dict = {}
+            candidates = (
+                (manifest.get("audio"), manifest),
+                (acquisition.get("audio"), acquisition.get("metadata", {})),
+                (audio_acquisition.get("asset"), audio_acquisition.get("metadata", {})),
+                (task.get("assets", {}).get("audio"), metadata),
+                ("audio.flac", metadata),
+            )
+            for name, evidence in candidates:
+                candidate = retained_file(directory, name)
+                if candidate is not None and candidate.resolve() != video.resolve():
+                    audio, audio_info = candidate, evidence
+                    break
+            if audio is None:
+                if has_audio is False:
+                    manifest["download"] = video.name
+                    publish()
+                    return video
+                try:
+                    audio, audio_info = await self.acquire_asset(task_id, url, kind="audio")
+                except BilibiliInputError:
+                    raise
+                except Exception:
+                    raise RuntimeError("audio_unavailable") from None
+            await self._validate_asset(directory, audio, kind="audio", identity=identity,
+                                       duration=video_duration, metadata=audio_info)
+            if manifest.get("fingerprints", {}).get("audio") != fingerprint(audio):
+                manifest.pop("download", None)
+            manifest.update(audio=audio.name, source_has_audio=True)
+            publish()
+            check_cancelled()
+            output = await prepare_video(directory, task, self.settings.process_timeout, source_has_audio=True)
+            await self._validate_asset(directory, output, kind="video", identity=identity,
+                                       duration=video_duration, metadata={})
+            check_cancelled()
+            manifest["download"] = output.name
+            publish()
+            return output
+        finally:
+            for pattern in ("*.part", "*.pending.*"):
+                for path in directory.glob(pattern):
+                    if path.is_file() and not path.is_symlink():
+                        path.unlink(missing_ok=True)
+
     async def acquire_upstream(self, task_id: str, url: str) -> tuple[Path, Path, dict]:
         directory = self.store.directory(task_id)
-        await run_process([sys.executable, "-m", "framenote.service_acquire", "--root", str(self.store.root),
-                           "--task-id", task_id, "--url", url, "--mode", "full"], timeout=self.settings.process_timeout,
-                          log=directory / "acquisition.log", env=self._acquisition_environment())
+        (directory / "source-resolution.json").unlink(missing_ok=True)
+        try:
+            await run_process([sys.executable, "-m", "framenote.service_acquire", "--root", str(self.store.root),
+                               "--task-id", task_id, "--url", url, "--mode", "full"], timeout=self.settings.process_timeout,
+                              log=directory / "acquisition.log", env=self._acquisition_environment())
+        except Exception:
+            self._acquisition_input_error(directory)
+            raise
         result = json.loads((directory / "acquisition.json").read_text())
         for note in result["notes"]:
             self.store.log(task_id, public_error(RuntimeError(note)))
@@ -103,7 +311,7 @@ class Pipeline:
         if task.get("upload_name"):
             path = directory / task["upload_name"]
             return path, path, {"title": task["title"], "source": "local", "acquisition_provider": "upload"}
-        url = task.get("source_identity", {}).get("canonical_url") or task["video_url"]
+        url = self._source_identity(task, directory).get("canonical_url") or task["video_url"]
         source = MediaDownloader.detect_source(url)
         if source == MediaSource.DOUYIN and self.settings.galaxy_enabled:
             if aborted():
@@ -114,12 +322,16 @@ class Pipeline:
                 return await self.acquire_upstream(task_id, url)
             except asyncio.CancelledError:
                 raise
+            except BilibiliInputError:
+                raise
             except Exception as error:
+                self._acquisition_input_error(directory)
                 if not self.settings.galaxy_enabled:
                     raise
                 if aborted():
                     raise asyncio.CancelledError
                 self.store.log(task_id, f"{source.value} 平台获取失败，使用Galaxy API：" + public_error(error))
+        url = self._galaxy_url(directory, url)
         self.store.update(task_id, phase="galaxy_download")
         video, audio, info = await GalaxyDownloader(self.settings.galaxy_base_url).download(url, directory)
         atomic_json(directory / "acquisition.json", {"video": video.name, "audio": audio.name,

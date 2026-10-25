@@ -529,3 +529,228 @@ def test_http_preserves_worker_bilibili_input_error(subtitle_pipeline, monkeypat
             time.sleep(.01)
         assert task['status'] == 'failed' and task['error']['code'] == code
         assert calls == {'media': [], 'asr': []}
+
+
+@pytest.fixture
+def media_pipeline(subtitle_pipeline, video, monkeypatch):
+    import subprocess
+    from dataclasses import asdict
+    pipeline, store, task_id, directory, identity, outcome, calls = subtitle_pipeline
+    # Start with text already completed and no media retained.
+    (directory / 'source.mp4').unlink()
+    (directory / 'transcript.json').write_bytes(b'{ "preserve": "original transcript" }')
+    store.update(task_id, status='completed', source_identity=asdict(identity), duration=5.)
+    from framenote.task_store import atomic_json
+    atomic_json(directory / 'metadata.json', {'duration': 5., 'source_identity': asdict(identity)})
+    assets = []
+    async def acquire_asset(task_id, url, *, kind):
+        assert url == identity.canonical_url
+        assets.append(kind)
+        target = directory / ('preview.mp4' if kind == 'video' else 'original.m4a')
+        flags = ['-an', '-c:v', 'copy'] if kind == 'video' else ['-vn', '-c:a', 'copy']
+        subprocess.run(['ffmpeg', '-v', 'error', '-i', str(video), *flags, '-y', str(target)], check=True)
+        return target, {'source_identity': asdict(identity), 'source_has_audio': True}
+    monkeypatch.setattr(pipeline, 'acquire_asset', acquire_asset, raising=False)
+    return pipeline, store, task_id, directory, assets
+
+
+@pytest.mark.asyncio
+async def test_frames_then_video_download_only_fetches_missing_audio(media_pipeline):
+    from framenote.service_process import probe_media
+    pipeline, store, task_id, directory, asset_calls = media_pipeline
+    original = (directory / 'transcript.json').read_bytes()
+    video = await pipeline.prepare_media(task_id, require_audio=False, cancelled=lambda: False)
+    assert {s['codec_type'] for s in (await probe_media(video))['streams']} == {'video'}
+    output = await pipeline.prepare_media(task_id, require_audio=True, cancelled=lambda: False)
+    assert asset_calls == ['video', 'audio']
+    assert any(s['codec_type'] == 'audio' for s in (await probe_media(output))['streams'])
+    assert (directory / 'transcript.json').read_bytes() == original
+    assert store.get(task_id)['status'] == 'completed'
+    media = json.loads((directory / 'media.json').read_text())
+    assert media['download'] == output.name and media['duration_verified'] is True
+    assert media['source_identity']['cid'] == 456 and media['source_has_audio'] is True
+
+
+@pytest.mark.asyncio
+async def test_missing_audio_is_failure_not_successful_silent_video(media_pipeline, monkeypatch):
+    pipeline, store, task_id, directory, calls = media_pipeline
+    await pipeline.prepare_media(task_id, require_audio=False, cancelled=lambda: False)
+    original = (directory / 'transcript.json').read_bytes()
+    async def unavailable(*args, **kwargs):
+        raise RuntimeError('https://cdn.example/private?token=secret')
+    monkeypatch.setattr(pipeline, 'acquire_asset', unavailable)
+    with pytest.raises(RuntimeError, match='^audio_unavailable$'):
+        await pipeline.prepare_media(task_id, require_audio=True, cancelled=lambda: False)
+    assert store.get(task_id)['status'] == 'completed'
+    assert (directory / 'preview.mp4').is_file()
+    assert (directory / 'transcript.json').read_bytes() == original
+
+
+@pytest.mark.asyncio
+async def test_explicit_silent_source_is_reported_as_silent(media_pipeline, monkeypatch):
+    pipeline, store, task_id, directory, calls = media_pipeline
+    original = pipeline.acquire_asset
+    async def silent(*args, **kwargs):
+        path, info = await original(*args, **kwargs)
+        return path, {**info, 'source_has_audio': False}
+    monkeypatch.setattr(pipeline, 'acquire_asset', silent)
+    output = await pipeline.prepare_media(task_id, require_audio=True, cancelled=lambda: False)
+    assert calls == ['video'] and output.name == 'preview.mp4'
+    assert json.loads((directory / 'media.json').read_text())['source_has_audio'] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('conflict', ['cid', 'duration'])
+async def test_conflicting_cid_or_duration_keeps_transcript_unchanged(media_pipeline, monkeypatch, conflict):
+    pipeline, store, task_id, directory, calls = media_pipeline
+    original = pipeline.acquire_asset
+    async def conflicting(*args, **kwargs):
+        path, info = await original(*args, **kwargs)
+        info['source_identity'][conflict] = 999
+        return path, info
+    monkeypatch.setattr(pipeline, 'acquire_asset', conflicting)
+    before = (directory / 'transcript.json').read_bytes()
+    with pytest.raises(RuntimeError, match='media_identity_mismatch|media_duration_mismatch'):
+        await pipeline.prepare_media(task_id, require_audio=False, cancelled=lambda: False)
+    assert not (directory / 'media.json').exists()
+    assert (directory / 'preview.mp4').exists()
+    assert (directory / 'transcript.json').read_bytes() == before
+    assert store.get(task_id)['status'] == 'completed'
+
+
+@pytest.mark.asyncio
+async def test_cached_mux_reuses_fingerprints(media_pipeline, monkeypatch):
+    pipeline, store, task_id, directory, calls = media_pipeline
+    first = await pipeline.prepare_media(task_id, require_audio=True, cancelled=lambda: False)
+    before = first.stat().st_mtime_ns
+    async def no_mux(*args, **kwargs):
+        pytest.fail('Unchanged retained sources must reuse mux')
+    monkeypatch.setattr('framenote.service_video.run_process', no_mux)
+    assert await pipeline.prepare_media(task_id, require_audio=True, cancelled=lambda: False) == first
+    assert first.stat().st_mtime_ns == before and calls == ['video', 'audio']
+
+
+@pytest.mark.asyncio
+async def test_media_cancel_keeps_validated_video_and_text(media_pipeline):
+    pipeline, store, task_id, directory, calls = media_pipeline
+    await pipeline.prepare_media(task_id, require_audio=False, cancelled=lambda: False)
+    marker = (directory / 'media.json').read_bytes()
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline.prepare_media(task_id, require_audio=True, cancelled=lambda: True)
+    assert (directory / 'media.json').read_bytes() == marker
+    assert (directory / 'preview.mp4').exists() and store.get(task_id)['status'] == 'completed'
+
+
+@pytest.mark.asyncio
+async def test_unknown_audio_evidence_is_not_inferred_from_silent_track(media_pipeline, monkeypatch):
+    pipeline, store, task_id, directory, calls = media_pipeline
+    original = pipeline.acquire_asset
+    async def unknown(*args, **kwargs):
+        path, info = await original(*args, **kwargs)
+        return path, {**info, 'source_has_audio': None, 'identity_evidence': 'url'}
+    monkeypatch.setattr(pipeline, 'acquire_asset', unknown)
+    await pipeline.prepare_media(task_id, require_audio=False, cancelled=lambda: False)
+    marker = json.loads((directory / 'media.json').read_text())
+    assert marker['source_has_audio'] is None and marker['identity_evidence'] == 'url'
+    await pipeline.prepare_media(task_id, require_audio=True, cancelled=lambda: False)
+    assert calls == ['video', 'audio']
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('kind', ['video', 'audio'])
+@pytest.mark.parametrize('configured', [False, True])
+async def test_single_asset_worker_uses_explicit_settings(subtitle_pipeline, monkeypatch, tmp_path, kind, configured):
+    from dataclasses import replace
+    pipeline, store, task_id, directory, identity, outcome, calls = subtitle_pipeline
+    credentials = tmp_path / 'private-path' if configured else None
+    pipeline.settings = replace(pipeline.settings, bilibili_credentials=credentials)
+    monkeypatch.setenv('FRAMENOTE_BILIBILI_CREDENTIALS', '/private/inherited')
+    async def worker(args, **kwargs):
+        assert args[args.index('--mode') + 1] == kind
+        assert kwargs['env'].get('FRAMENOTE_BILIBILI_CREDENTIALS') == (str(credentials) if configured else None)
+        assert str(credentials) not in args
+        (directory / f'acquisition.{kind}.json').write_text(json.dumps({'asset': 'source.mp4', 'metadata': {}}))
+    monkeypatch.setattr('framenote.service_pipeline.run_process', worker)
+    await pipeline.acquire_asset(task_id, identity.canonical_url, kind=kind)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['full', 'video', 'audio'])
+@pytest.mark.parametrize('code', ['invalid_video_url', 'media_identity_mismatch'])
+async def test_worker_source_error_never_falls_through_to_galaxy(subtitle_pipeline, monkeypatch, mode, code):
+    from dataclasses import replace
+    from framenote.subtitles import BilibiliInputError
+    pipeline, store, task_id, directory, identity, outcome, calls = subtitle_pipeline
+    pipeline.settings = replace(pipeline.settings, galaxy_enabled=True)
+    monkeypatch.delattr(pipeline, 'acquire_upstream')
+    async def worker(args, **kwargs):
+        (directory / 'source-resolution.json').write_text(json.dumps({'error': {
+            'code': code, 'message': 'Source validation failed'}}))
+        raise RuntimeError('worker failed')
+    async def forbidden(*args):
+        pytest.fail('Unsafe source may not be sent to Galaxy')
+    monkeypatch.setattr('framenote.service_pipeline.run_process', worker)
+    monkeypatch.setattr('framenote.galaxy_downloader.GalaxyDownloader.download', forbidden)
+    monkeypatch.setattr('framenote.galaxy_downloader.GalaxyDownloader.download_video', forbidden)
+    monkeypatch.setattr('framenote.galaxy_downloader.GalaxyDownloader.download_audio', forbidden)
+    with pytest.raises(BilibiliInputError if code == 'invalid_video_url' else RuntimeError) as caught:
+        if mode == 'full':
+            await pipeline.acquire(task_id, lambda: False)
+        else:
+            await pipeline.acquire_asset(task_id, store.get(task_id)['video_url'], kind=mode)
+    if code == 'invalid_video_url':
+        assert caught.value.code == code
+    else:
+        assert str(caught.value) == code
+
+
+@pytest.mark.asyncio
+async def test_audio_cancellation_cleans_pending_and_keeps_verified_video(media_pipeline, monkeypatch):
+    pipeline, store, task_id, directory, calls = media_pipeline
+    await pipeline.prepare_media(task_id, require_audio=False, cancelled=lambda: False)
+    original = (directory / 'transcript.json').read_bytes()
+    async def interrupted(*args, **kwargs):
+        (directory / 'audio-original.m4a.part').write_bytes(b'partial')
+        raise asyncio.CancelledError
+    monkeypatch.setattr(pipeline, 'acquire_asset', interrupted)
+    with pytest.raises(asyncio.CancelledError):
+        await pipeline.prepare_media(task_id, require_audio=True, cancelled=lambda: False)
+    assert not list(directory.glob('*.part'))
+    assert (directory / 'preview.mp4').is_file()
+    assert (directory / 'transcript.json').read_bytes() == original
+    assert store.get(task_id)['status'] == 'completed'
+
+
+@pytest.mark.asyncio
+async def test_completed_track_protocols_recover_without_redownload(media_pipeline, monkeypatch):
+    pipeline, store, task_id, directory, calls = media_pipeline
+    from framenote.task_store import atomic_json
+    for kind in ('video', 'audio'):
+        path, info = await pipeline.acquire_asset(task_id, store.get(task_id)['source_identity']['canonical_url'], kind=kind)
+        atomic_json(directory / f'acquisition.{kind}.json', {'asset': path.name, 'metadata': info})
+    async def forbidden(*args, **kwargs):
+        pytest.fail('Retained completed track protocol should be reused')
+    monkeypatch.setattr(pipeline, 'acquire_asset', forbidden)
+    output = await pipeline.prepare_media(task_id, require_audio=True, cancelled=lambda: False)
+    assert output.is_file() and calls == ['video', 'audio']
+
+
+@pytest.mark.asyncio
+async def test_retained_audio_is_preferred_over_silent_source_hint(media_pipeline, monkeypatch):
+    pipeline, store, task_id, directory, calls = media_pipeline
+    original = pipeline.acquire_asset
+    # A retained normalized audio track is stronger evidence than a silent hint.
+    audio, _ = await original(task_id, store.get(task_id)['source_identity']['canonical_url'], kind='audio')
+    import subprocess
+    subprocess.run(['ffmpeg', '-v', 'error', '-i', str(audio), '-ac', '1', '-ar', '16000',
+                    '-c:a', 'flac', str(directory / 'audio.flac')], check=True)
+    calls.clear()
+    async def silent(*args, **kwargs):
+        path, info = await original(*args, **kwargs)
+        return path, {**info, 'source_has_audio': False}
+    monkeypatch.setattr(pipeline, 'acquire_asset', silent)
+    output = await pipeline.prepare_media(task_id, require_audio=True, cancelled=lambda: False)
+    from framenote.service_process import probe_media
+    assert any(stream['codec_type'] == 'audio' for stream in (await probe_media(output))['streams'])
+    assert calls == ['video']
+    assert json.loads((directory / 'media.json').read_text())['source_has_audio'] is True

@@ -585,3 +585,157 @@ def test_subtitle_worker_serializes_long_integer_input_error_without_network(tmp
     with pytest.raises(BilibiliInputError) as error:
         SubtitleOutcome.from_payload(payload)
     assert error.value.code == code
+
+
+@pytest.mark.asyncio
+async def test_video_only_worker_never_downloads_audio(tmp_path, monkeypatch, video):
+    import shutil
+    from framenote import service_acquire
+    async def info(*args, **kwargs):
+        return {'title': 'fixture', 'source': 'youtube'}
+    async def preview(self, url, task_id, **kwargs):
+        directory = tmp_path / task_id
+        directory.mkdir(exist_ok=True)
+        return Path(shutil.copyfile(video, directory / 'preview.mp4'))
+    async def unexpected(*args, **kwargs):
+        pytest.fail('Video-only worker fetched audio')
+    monkeypatch.setattr(MediaDownloader, 'get_video_info', info)
+    monkeypatch.setattr(MediaDownloader, 'download_preview_video', preview)
+    monkeypatch.setattr(MediaDownloader, 'download_audio', unexpected)
+    await service_acquire.acquire(tmp_path, 'video-task', 'https://www.youtube.com/watch?v=BaW_jenozKc', mode='video')
+    payload = json.loads((tmp_path / 'video-task/acquisition.video.json').read_text())
+    assert payload['asset'] == 'preview.mp4' and payload['metadata']['source_has_audio'] is True
+    assert not (tmp_path / 'video-task/acquisition.json').exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['full', 'video', 'audio'])
+async def test_media_workers_reject_unsafe_identity_redirect_before_legacy(tmp_path, monkeypatch, mode):
+    import threading
+    from framenote import service_acquire
+    from framenote.platform_http import BilibiliHTTPError
+    from framenote.subtitles import BilibiliInputError
+    def unsafe(self, url):
+        assert threading.current_thread() is threading.main_thread()
+        raise BilibiliHTTPError('unsafe_target', 'blocked')
+    def forbidden(*args, **kwargs):
+        pytest.fail('Unsafe identity may not enter legacy acquisition')
+    monkeypatch.setattr(service_acquire.BilibiliHTTP, 'resolve_short_url', unsafe)
+    monkeypatch.setattr(MediaDownloader, '_resolve_bili_short_url', forbidden)
+    monkeypatch.setattr(MediaDownloader, 'get_video_info', forbidden)
+    with pytest.raises(BilibiliInputError) as caught:
+        await service_acquire.acquire(tmp_path, 'unsafe-task', 'https://b23.tv/unsafe', mode=mode)
+    assert caught.value.code == 'invalid_video_url'
+    payload = json.loads((tmp_path / 'unsafe-task/source-resolution.json').read_text())
+    assert payload['error']['code'] == 'invalid_video_url'
+
+
+@pytest.mark.asyncio
+async def test_safe_short_expansion_survives_metadata_outage(tmp_path, monkeypatch, video):
+    import threading
+    from framenote import service_acquire
+    from framenote.platform_http import BilibiliHTTPError
+    target = _BILI_URL + '?p=2'
+    def expand(self, url):
+        assert threading.current_thread() is threading.main_thread()
+        return _BILI_URL + '?p=1'
+    def unavailable(*args):
+        raise BilibiliHTTPError('network_error', 'network unavailable')
+    def forbidden(*args, **kwargs):
+        pytest.fail('Safe expanded URL must not go through weak short resolver')
+    async def info(self, url, **kwargs):
+        assert url == target
+        return {'title': 'fixture', 'source': 'bilibili'}
+    async def preview(self, url, task_id, **kwargs):
+        assert url == target
+        path = tmp_path / task_id / 'preview.mp4'
+        path.write_bytes(video.read_bytes())
+        return path
+    monkeypatch.setattr(service_acquire.BilibiliHTTP, 'resolve_short_url', expand)
+    monkeypatch.setattr(service_acquire.BilibiliClient, 'resolve', unavailable)
+    monkeypatch.setattr(MediaDownloader, '_resolve_bili_short_url', forbidden)
+    monkeypatch.setattr(MediaDownloader, 'get_video_info', info)
+    monkeypatch.setattr(MediaDownloader, 'download_preview_video', preview)
+    await service_acquire.acquire(tmp_path, 'safe-task', 'https://b23.tv/safe?p=2', mode='video')
+    payload = json.loads((tmp_path / 'safe-task/acquisition.video.json').read_text())
+    assert payload['metadata']['source_url'] == target
+    assert payload['metadata']['identity_evidence'] == 'url'
+    assert 'source_identity' not in payload['metadata']
+
+
+@pytest.mark.asyncio
+async def test_native_single_track_binds_previously_resolved_cid(tmp_path, monkeypatch, video):
+    from dataclasses import asdict
+    from framenote import service_acquire
+    from framenote.task_store import TaskStore
+    from framenote.subtitles import BilibiliIdentity
+    from framenote.platform_http import BilibiliHTTPError
+    store = TaskStore(tmp_path)
+    identity = BilibiliIdentity(_BILI_URL + '?p=2', 'BV1xM4y1z7Kt', 77, 2, 102, 'part two', 5., 'fixture')
+    task_id = store.create(video_url='https://b23.tv/original', source_identity=asdict(identity))['task_id']
+    def unavailable(*args):
+        raise BilibiliHTTPError('network_error', 'metadata unavailable')
+    monkeypatch.setattr(service_acquire.BilibiliClient, 'resolve', unavailable)
+    calls = []
+    def play(self, api, params, headers):
+        calls.append(params)
+        return {'code': 0, 'data': {'dash': {'video': [{'baseUrl': 'https://cn.bilivideo.com/track'}],
+                                                   'audio': [{'baseUrl': 'https://cn.bilivideo.com/audio'}]}}}
+    def media(self, url, target, referer, cookie, **kwargs):
+        assert url.endswith('/track')
+        target.write_bytes(video.read_bytes())
+        return target
+    def forbidden(*args, **kwargs):
+        pytest.fail('Native known identity may not be reselected by yt-dlp')
+    monkeypatch.setattr(MediaDownloader, '_bilibili_get_json', play)
+    monkeypatch.setattr(MediaDownloader, '_download_direct_media', media)
+    monkeypatch.setattr(MediaDownloader, 'download_preview_video', forbidden)
+    await service_acquire.acquire(tmp_path, task_id, identity.canonical_url, mode='video')
+    assert calls == [{'cid': 102, 'fnval': 16, 'bvid': identity.bvid}]
+    payload = json.loads((tmp_path / task_id / 'acquisition.video.json').read_text())
+    assert payload['metadata']['source_identity']['cid'] == 102
+    assert payload['metadata']['identity_evidence'] == 'cid'
+
+
+@pytest.mark.asyncio
+async def test_native_worker_reuses_metadata_identity_during_view_outage(tmp_path, monkeypatch, video):
+    from dataclasses import asdict
+    from framenote import service_acquire
+    from framenote.task_store import TaskStore, atomic_json
+    from framenote.subtitles import BilibiliIdentity
+    from framenote.platform_http import BilibiliHTTPError
+    store = TaskStore(tmp_path)
+    identity = BilibiliIdentity(_BILI_URL + '?p=2', 'BV1xM4y1z7Kt', 77, 2, 102, 'part', 5., 'fixture')
+    task_id = store.create(video_url=identity.canonical_url)['task_id']
+    atomic_json(store.directory(task_id) / 'metadata.json', {'source_identity': asdict(identity)})
+    def unavailable(*args):
+        raise BilibiliHTTPError('network_error', 'view unavailable')
+    def forbidden(*args, **kwargs):
+        pytest.fail('Known metadata identity must bind native CID even during an outage')
+    def direct(self, url, target, cookie, kind, *args):
+        assert self._bili_view_cache[identity.bvid]['pages'][0]['cid'] == 102
+        target.write_bytes(video.read_bytes())
+        return target
+    monkeypatch.setattr(service_acquire.BilibiliClient, 'resolve', unavailable)
+    monkeypatch.setattr(MediaDownloader, 'get_video_info', forbidden)
+    monkeypatch.setattr(MediaDownloader, '_download_bilibili_media_via_api', direct)
+    await service_acquire.acquire(tmp_path, task_id, identity.canonical_url, mode='video')
+    payload = json.loads((store.directory(task_id) / 'acquisition.video.json').read_text())
+    assert payload['metadata']['source_identity']['cid'] == identity.cid
+
+
+@pytest.mark.asyncio
+async def test_native_worker_identity_conflict_is_persisted_before_media(tmp_path, monkeypatch):
+    from dataclasses import asdict, replace
+    from framenote import service_acquire
+    from framenote.task_store import TaskStore
+    from framenote.subtitles import BilibiliIdentity
+    store = TaskStore(tmp_path)
+    identity = BilibiliIdentity(_BILI_URL + '?p=2', 'BV1xM4y1z7Kt', 77, 2, 102, 'part', 5., 'fixture')
+    task_id = store.create(source_identity=asdict(identity))['task_id']
+    monkeypatch.setattr(service_acquire.BilibiliClient, 'resolve', lambda *args: replace(identity, cid=999))
+    with pytest.raises(RuntimeError, match='^media_identity_mismatch$'):
+        await service_acquire.acquire(tmp_path, task_id, identity.canonical_url, mode='video')
+    assert json.loads((store.directory(task_id) / 'source-resolution.json').read_text()) == {
+        'error': {'code': 'media_identity_mismatch'}}
+    assert not (store.directory(task_id) / 'acquisition.video.json').exists()

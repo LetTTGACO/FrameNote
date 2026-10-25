@@ -650,3 +650,15 @@ def test_force_asr_creates_new_bilibili_task_and_retains_submission_option(tmp_p
         assert client.app.state.store.directory(normal) != client.app.state.store.directory(forced)
         youtube = client.post('/api/transcribe', json={'video_url': 'https://youtu.be/BaW_jenozKc'}).json()['task_id']
         assert 'material_schema_version' not in client.get(f'/api/task/{youtube}').json()
+
+
+@pytest.mark.asyncio
+async def test_prepare_video_reads_media_manifest_and_requires_audio(tmp_path, video):
+    from framenote.service_video import prepare_video, retained_video
+    source = tmp_path / 'retained.mp4'
+    subprocess.run(['ffmpeg', '-v', 'error', '-i', str(video), '-an', '-c:v', 'copy', str(source)], check=True)
+    atomic_json(tmp_path / 'media.json', {'video': source.name, 'source_has_audio': None})
+    assert retained_video(tmp_path, {}) == source
+    with pytest.raises(RuntimeError, match='audio_unavailable'):
+        await prepare_video(tmp_path, {}, timeout=30)
+    assert await prepare_video(tmp_path, {}, timeout=30, source_has_audio=False) == source

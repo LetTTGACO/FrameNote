@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import signal
 from pathlib import Path
@@ -70,3 +71,9 @@ async def run_process(args: list[str], *, timeout: float = 7200,
             reaper.result()
             if interrupted:
                 raise asyncio.CancelledError
+
+
+async def probe_media(path: Path) -> dict:
+    raw = await run_process(["ffprobe", "-v", "error", "-show_format", "-show_streams",
+                             "-of", "json", str(path)], timeout=30)
+    return json.loads(raw)

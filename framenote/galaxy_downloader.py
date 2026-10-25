@@ -116,7 +116,7 @@ class GalaxyDownloader:
             partial.unlink(missing_ok=True)
             remux.unlink(missing_ok=True)
 
-    async def download(self, url: str, directory: Path) -> tuple[Path, Path, dict]:
+    async def _resolve(self, url: str, directory: Path) -> tuple[dict, dict]:
         source = MediaDownloader.detect_source(url)
         if source not in {MediaSource.BILIBILI, MediaSource.DOUYIN, MediaSource.YOUTUBE}:
             raise ValueError("Unsupported Galaxy source platform")
@@ -140,13 +140,29 @@ class GalaxyDownloader:
             reported_platform = "bilibili"
         if reported_platform not in {None, source.value}:
             raise RuntimeError("Galaxy returned a different platform")
+        metadata = {"title": str(data.get("title") or "视频"),
+                    "description": str(data.get("description") or data.get("desc") or ""),
+                    "owner": str(data.get("author") or ""), "source": source.value,
+                    "acquisition_provider": "galaxy_api", "source_url": url,
+                    "identity_evidence": "url", "source_has_audio": None}
+        return data, metadata
+
+    async def download_video(self, url: str, directory: Path) -> tuple[Path, dict]:
+        data, metadata = await self._resolve(url, directory)
         video, media = await self._download_media(self._media_url(data, "video"), directory / "source.mp4", "video")
-        # Inspect tracks rather than relying on the API's videoAudioMode hint.
+        if any(stream.get("codec_type") == "audio" for stream in media.get("streams", [])):
+            metadata["source_has_audio"] = True
+        return video, metadata
+
+    async def download_audio(self, url: str, directory: Path) -> tuple[Path, dict]:
+        data, metadata = await self._resolve(url, directory)
+        audio, _ = await self._download_media(self._media_url(data, "audio"), directory / "source-audio.media", "audio")
+        return audio, {**metadata, "source_has_audio": True}
+
+    async def download(self, url: str, directory: Path) -> tuple[Path, Path, dict]:
+        data, metadata = await self._resolve(url, directory)
+        video, media = await self._download_media(self._media_url(data, "video"), directory / "source.mp4", "video")
         audio = video
         if not any(stream.get("codec_type") == "audio" for stream in media.get("streams", [])):
             audio, _ = await self._download_media(self._media_url(data, "audio"), directory / "source-audio.media", "audio")
-        # Keep source identity; discard expiring URLs and unrelated API fields.
-        return video, audio, {"title": str(data.get("title") or "视频"),
-                              "description": str(data.get("description") or data.get("desc") or ""),
-                              "owner": str(data.get("author") or ""), "source": source.value,
-                              "acquisition_provider": "galaxy_api", "source_url": url}
+        return video, audio, {**metadata, "source_has_audio": True}
