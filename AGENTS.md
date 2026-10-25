@@ -20,12 +20,12 @@ The repository separates runtime code, the client workflow, and operations:
 - `docs/` describes contracts and operations; `deploy/` contains environment and
   systemd templates. Generated media and notes belong in ignored `workspace/`.
 
-## Find private operations records
+## Project operations
 
-For deployment history, instance paths, or an instance rollback, run
-`git config --path --get framenote.privateDocsPath` and read the configured
-repository's `README.md`. The local setting is shared by linked worktrees;
-keep the private repository at its configured fixed location.
+For this project's deployment, runtime status, deployment history, or rollback,
+first run `git config --path --get framenote.privateDocsPath` and read the
+configured private repository's `README.md`. Maintain operations records at
+that fixed location, regardless of the branch used for deployment.
 
 Commit instance records in that separate repository. Keep reusable procedures
 in this repository's `docs/`. Private records must stay outside parent commits
