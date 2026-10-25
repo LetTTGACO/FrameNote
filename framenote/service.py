@@ -15,6 +15,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFi
 from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, model_validator
 
+from .acquisition import MediaDownloader, MediaSource
 from .frame_extractor import extract_frame
 from .service_mcp import create_mcp
 from .service_pipeline import Pipeline, platform_url
@@ -31,6 +32,7 @@ VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".mpeg", ".mp
 class TranscribeRequest(BaseModel):
     video_url: str = ""
     upload_task_id: str = ""
+    force_asr: bool = False
 
     @model_validator(mode="after")
     def one_input(self):
@@ -135,7 +137,11 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
             if task["status"] != "uploaded":
                 raise HTTPException(409, "Upload has already been submitted")
         else:
-            task = store.create(video_url=body.video_url, title="视频", source="online")
+            values: dict[str, Any] = {"video_url": body.video_url, "title": "视频", "source": "online",
+                                      "force_asr": body.force_asr}
+            if MediaDownloader.detect_source(body.video_url) == MediaSource.BILIBILI:
+                values["material_schema_version"] = 3
+            task = store.create(**values)
         jobs.enqueue(task["task_id"])
         return {"task_id": task["task_id"]}
 

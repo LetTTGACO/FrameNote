@@ -630,3 +630,23 @@ def test_transcript_route_rejects_external_symlink(tmp_path):
         task_id = task['task_id']
         (client.app.state.store.directory(task_id) / 'transcript.json').symlink_to(outside)
         assert client.get(f'/api/task/{task_id}/transcript').status_code == 409
+
+
+def test_force_asr_creates_new_bilibili_task_and_retains_submission_option(tmp_path, monkeypatch):
+    seen = []
+    async def run(self, task_id, aborted):
+        seen.append(self.store.get(task_id))
+        self.store.update(task_id, status='completed', phase='completed', progress=100)
+    monkeypatch.setattr(Pipeline, 'run', run)
+    with client_for(config(tmp_path)) as client:
+        url = 'https://www.bilibili.com/video/BV1cfaf6SEA9/?p=2'
+        normal = client.post('/api/transcribe', json={'video_url': url}).json()['task_id']
+        forced = client.post('/api/transcribe', json={'video_url': url, 'force_asr': True}).json()['task_id']
+        assert forced != normal
+        for task_id, force_asr in [(normal, False), (forced, True)]:
+            task = client.get(f'/api/task/{task_id}').json()
+            assert task['force_asr'] is force_asr and task['material_schema_version'] == 3
+            assert 'p=2' in task['video_url']
+        assert client.app.state.store.directory(normal) != client.app.state.store.directory(forced)
+        youtube = client.post('/api/transcribe', json={'video_url': 'https://youtu.be/BaW_jenozKc'}).json()['task_id']
+        assert 'material_schema_version' not in client.get(f'/api/task/{youtube}').json()

@@ -4,6 +4,7 @@ import asyncio
 from contextlib import suppress
 from .asr.types import ASRError
 from .service_pipeline import Pipeline
+from .subtitles import BilibiliInputError
 from .task_store import TERMINAL, TaskStore, public_error
 
 
@@ -41,7 +42,7 @@ class Jobs:
                     self.store.update(task_id, status="cancelled", phase="cancelled")
                 except Exception as error:
                     phase = self.store.get(task_id)["phase"]
-                    self.store.update(task_id, status="failed", error={"code": error.code if isinstance(error, ASRError) else phase + "_failed", "message": public_error(error)})
+                    self.store.update(task_id, status="failed", error={"code": error.code if isinstance(error, (ASRError, BilibiliInputError)) else phase + "_failed", "message": public_error(error)})
             finally:
                 self.active = None
                 self.active_id = None

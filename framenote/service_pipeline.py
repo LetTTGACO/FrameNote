@@ -1,24 +1,25 @@
-"""Acquire and retain media, normalize audio, then run the isolated ASR worker."""
+"""Prefer platform subtitles, falling back to isolated media acquisition and ASR."""
 from __future__ import annotations
 
 import asyncio
 from dataclasses import asdict
-import shutil
 import json
 import os
 from pathlib import Path
 import sys
 import time
-from typing import Any, Callable, cast
+from typing import Callable
 from urllib.parse import urlsplit
 
 from .galaxy_downloader import GalaxyDownloader
 from .service_process import run_process
 from .service_settings import Settings
 from .asr import create_backend
-from .asr.types import ASRBackend, ASRRequest, ASRProgress, ASRError, result_to_payload
+from .asr.types import ASRBackend, ASRRequest, ASRProgress, ASRError
 from .task_store import TaskStore, atomic_json, public_error
-from .transcript import TranscriptSegment, finite_number, segments_to_prompt, segments_to_srt
+from .transcript import finite_number
+from .materials import publish_asr, publish_subtitles, write_subtitle_attempts
+from .subtitles import BilibiliInputError, SubtitleAttempt, SubtitleOutcome
 from .acquisition import MediaDownloader, MediaSource, bilibili_page_url, normalize_video_input, youtube_video_url
 
 
@@ -47,13 +48,50 @@ class Pipeline:
         self.settings, self.store = settings, store
         self.backend = backend if backend is not None else create_backend(settings)
 
-    async def acquire_upstream(self, task_id: str, url: str) -> tuple[Path, Path, dict]:
-        directory = self.store.directory(task_id)
+    def _acquisition_environment(self) -> dict[str, str]:
         env = os.environ.copy()
         env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+        env["FRAMENOTE_PROCESS_TIMEOUT"] = str(self.settings.process_timeout)
+        credentials = self.settings.bilibili_credentials
+        if credentials is None:
+            env.pop("FRAMENOTE_BILIBILI_CREDENTIALS", None)
+        else:
+            env["FRAMENOTE_BILIBILI_CREDENTIALS"] = str(credentials)
+        return env
+
+    async def acquire_subtitles(self, task_id: str, aborted: Callable[[], bool]) -> SubtitleOutcome:
+        directory = self.store.directory(task_id)
+        if aborted():
+            raise asyncio.CancelledError
+        try:
+            await run_process([sys.executable, "-m", "framenote.service_acquire", "--root", str(self.store.root),
+                               "--task-id", task_id, "--url", self.store.get(task_id)["video_url"],
+                               "--mode", "subtitles"], timeout=self.settings.process_timeout,
+                              log=directory / "acquisition.log", env=self._acquisition_environment())
+            if aborted():
+                raise asyncio.CancelledError
+            payload = json.loads((directory / "subtitle-acquisition.json").read_text())
+            outcome = SubtitleOutcome.from_payload(payload)
+        except BilibiliInputError:
+            raise
+        except (TimeoutError, asyncio.TimeoutError):
+            outcome = SubtitleOutcome(None, None, [SubtitleAttempt("worker", None, "error", "deadline_exceeded")],
+                                      "deadline_exceeded")
+        except (ValueError, KeyError, TypeError, AttributeError):
+            outcome = SubtitleOutcome(None, None, [SubtitleAttempt("worker", None, "error", "invalid_response")],
+                                      "invalid_response")
+        except (OSError, RuntimeError):
+            outcome = SubtitleOutcome(None, None, [SubtitleAttempt("worker", None, "error", "worker_failed")],
+                                      "worker_failed")
+        if aborted():
+            raise asyncio.CancelledError
+        return outcome
+
+    async def acquire_upstream(self, task_id: str, url: str) -> tuple[Path, Path, dict]:
+        directory = self.store.directory(task_id)
         await run_process([sys.executable, "-m", "framenote.service_acquire", "--root", str(self.store.root),
-                           "--task-id", task_id, "--url", url], timeout=self.settings.process_timeout,
-                          log=directory / "acquisition.log", env=env)
+                           "--task-id", task_id, "--url", url, "--mode", "full"], timeout=self.settings.process_timeout,
+                          log=directory / "acquisition.log", env=self._acquisition_environment())
         result = json.loads((directory / "acquisition.json").read_text())
         for note in result["notes"]:
             self.store.log(task_id, public_error(RuntimeError(note)))
@@ -65,7 +103,7 @@ class Pipeline:
         if task.get("upload_name"):
             path = directory / task["upload_name"]
             return path, path, {"title": task["title"], "source": "local", "acquisition_provider": "upload"}
-        url = task["video_url"]
+        url = task.get("source_identity", {}).get("canonical_url") or task["video_url"]
         source = MediaDownloader.detect_source(url)
         if source == MediaSource.DOUYIN and self.settings.galaxy_enabled:
             if aborted():
@@ -92,6 +130,42 @@ class Pipeline:
         directory = self.store.directory(task_id)
         started = time.perf_counter()
         self.store.update(task_id, phase="acquisition", progress=5)
+        task = self.store.get(task_id)
+        is_bilibili = (not task.get("upload_name") and
+                       MediaDownloader.detect_source(task.get("video_url", "")) == MediaSource.BILIBILI)
+        identity = None
+        if is_bilibili:
+            self.store.update(task_id, material_schema_version=3)
+            if not task.get("force_asr", False):
+                outcome = await self.acquire_subtitles(task_id, aborted)
+                if aborted():
+                    raise asyncio.CancelledError
+                write_subtitle_attempts(directory, outcome.attempts)
+                identity = outcome.identity
+                if identity is None and outcome.fallback_reason == "unsafe_target":
+                    raise BilibiliInputError("invalid_video_url", "Unsafe Bilibili video URL")
+                if identity is not None:
+                    self.store.update(task_id, source_identity=asdict(identity))
+                if outcome.choice is not None and identity is not None:
+                    preparation_seconds = time.perf_counter() - started
+                    payload = publish_subtitles(directory, identity, outcome.choice, cancelled=aborted)
+                    atomic_json(directory / "metadata.json", {
+                        "title": identity.title, "source": "bilibili", "source_url": task["video_url"],
+                        "duration": identity.duration, "duration_source": "platform_part",
+                        "source_identity": asdict(identity), "completeness": "unknown",
+                    })
+                    if aborted():
+                        raise asyncio.CancelledError
+                    timings = {"output": "transcript", "source_kind": payload["source_kind"],
+                               "segment_count": len(outcome.choice.segments), "timestamp_kind": "subtitle_interval",
+                               "preparation_seconds": round(preparation_seconds, 3),
+                               "total_seconds": round(time.perf_counter() - started, 3)}
+                    self.store.update(task_id, status="completed", phase="completed", progress=100,
+                                      title=identity.title, duration=identity.duration, result=timings)
+                    return
+                self.store.update(task_id, fallback_reason=outcome.fallback_reason)
+        if aborted():
+            raise asyncio.CancelledError
         video, audio_source, info = await self.acquire(task_id, aborted)
         probe = await probe_media(video)
         if not any(s.get("codec_type") == "video" for s in probe.get("streams", [])):
@@ -99,7 +173,11 @@ class Pipeline:
         duration = float(probe["format"].get("duration") or 0)
         if duration <= 0:
             raise RuntimeError("无法读取有效视频时长")
-        atomic_json(directory / "metadata.json", {**info, "duration": duration, "streams": probe["streams"]})
+        metadata = {**info, "duration": duration, "duration_source": "media_probe", "streams": probe["streams"]}
+        if identity is not None:
+            metadata.update(platform_duration=identity.duration, source_identity=asdict(identity),
+                            source_url=task["video_url"])
+        atomic_json(directory / "metadata.json", metadata)
         self.store.update(task_id, title=info.get("title") or "视频", duration=duration,
                           acquisition_provider=info.get("acquisition_provider"),
                           assets={"video": video.name}, phase="audio", progress=20)
@@ -134,28 +212,8 @@ class Pipeline:
         asr_seconds = time.perf_counter() - asr_started
         if aborted():
             raise asyncio.CancelledError
-        payload = result_to_payload(result, duration=audio_duration)
-        raw = result.raw_path.resolve()
-        if not raw.is_relative_to(directory.resolve()) or not raw.is_file():
-            raise ASRError("asr_invalid_response", "ASR raw artifact must belong to this task")
-        if aborted():
-            raise asyncio.CancelledError
-        raw_path = directory / "asr.raw.json"
-        if raw != raw_path.resolve():
-            pending_raw = directory / "asr.raw.pending.json"
-            try:
-                shutil.copyfile(raw, pending_raw)
-                pending_raw.replace(raw_path)
-            finally:
-                pending_raw.unlink(missing_ok=True)
-        segments = [TranscriptSegment(**item) for item in cast(list[dict[str, Any]], payload["segments"])]
-        atomic_json(directory / "transcript.json", payload)
-        explanation = ("时间范围来自VAD语音片段，非词级时间戳。" if result.timestamp_kind == "VAD_interval"
-                       else "时间范围来自转录后端的分段区间，非词级时间戳。")
-        (directory / "transcript.md").write_text(
-            "# 未人工校对的转录原稿\n\n" + explanation + "\n\n" + segments_to_prompt(segments) + "\n", encoding="utf-8")
-        (directory / "transcript.srt").write_text(segments_to_srt(segments), encoding="utf-8", newline="")
-        timings = {"output": "transcript", "segment_count": len(segments), "timestamp_kind": result.timestamp_kind,
+        publish_asr(directory, result, duration=audio_duration, cancelled=aborted)
+        timings = {"output": "transcript", "segment_count": len(result.segments), "timestamp_kind": result.timestamp_kind,
                    "preparation_seconds": round(preparation_seconds, 3), "asr_seconds": round(asr_seconds, 3),
                    "total_seconds": round(time.perf_counter() - started, 3)}
         if "load_seconds" in result.metrics:
