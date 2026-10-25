@@ -631,3 +631,69 @@ def test_media_timeout_preserves_existing_video_and_incomplete_marker(tmp_path, 
     assert json.loads((materials / "bundle.json").read_text())["download_complete"] is False
     assert (materials / "video.mp4").read_bytes() == b"original video"
     assert (tmp_path / "notes.md").read_bytes() == b"original notes"
+
+
+@pytest.fixture
+def offline_urllib_connection(monkeypatch):
+    """Exercise urllib's real handler and OSError wrapper without opening sockets."""
+    import io
+    from urllib.response import addinfourl
+
+    responses = []
+    requests = []
+    connection_type = module.http.client.HTTPConnection
+
+    class Connection(connection_type):
+        def request(self, method, url, body=None, headers=None, *, encode_chunked=False):
+            requests.append((method, url))
+            response = responses.pop(0)
+            if isinstance(response, BaseException):
+                raise response
+            self.payload = response
+
+        def getresponse(self):
+            response = addinfourl(io.BytesIO(json.dumps(self.payload).encode()), {}, "http://server:9", 200)
+            response.reason = "OK"
+            return response
+
+    monkeypatch.setattr(module.http.client, "HTTPConnection", Connection)
+    monkeypatch.setattr(module.time, "sleep", lambda seconds: None)
+    return responses, requests
+
+
+@pytest.mark.parametrize("helper", ["wait_operation", "request_frames", "prepare_video"])
+def test_urllib_wrapped_operation_timeout_retains_recovery_ids(offline_urllib_connection, helper):
+    responses, requests = offline_urllib_connection
+    operation = {"operation_id": "resume-op", "status": "processing"}
+    if helper != "wait_operation":
+        responses.append(operation)
+    responses.append(TimeoutError("socket timed out"))
+    client = module.Client("http://server:9")
+    with pytest.raises(TimeoutError, match="task-A resume-op"):
+        if helper == "wait_operation":
+            client.wait_operation("task-A", "resume-op", timeout=1800)
+        elif helper == "request_frames":
+            client.request_frames("task-A", [12], timeout=1800)
+        else:
+            client.prepare_video("task-A", timeout=1800)
+    assert requests[-1][0] == "GET"
+    assert requests[-1][1].startswith("/api/task/task-A/operations/resume-op?")
+    assert not responses
+
+
+def test_urllib_wrapped_timeout_returns_latest_operation_snapshot(offline_urllib_connection):
+    responses, requests = offline_urllib_connection
+    operation = {"operation_id": "resume-op", "status": "processing", "phase": "acquisition"}
+    responses.extend([operation, TimeoutError("socket timed out")])
+    result = module.Client("http://server:9").wait_operation("task-A", "resume-op", timeout=1800)
+    assert result == operation
+    assert len(requests) == 2
+
+
+def test_urllib_non_timeout_preserves_connection_error(offline_urllib_connection):
+    responses, _ = offline_urllib_connection
+    reason = ConnectionRefusedError("connection refused")
+    responses.append(reason)
+    with pytest.raises(module.urllib.error.URLError) as error:
+        module.Client("http://server:9").wait_operation("task-A", "resume-op", timeout=1800)
+    assert error.value.reason is reason

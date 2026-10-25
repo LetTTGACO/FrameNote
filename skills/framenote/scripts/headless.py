@@ -263,7 +263,9 @@ class Client:
             try:
                 latest = self.request("GET", f"/api/task/{task_id}/operations/{operation_id}?{query}",
                                       timeout=min(50, max(.001, remaining)) if timeout else 1)
-            except TimeoutError:
+            except (TimeoutError, urllib.error.URLError) as error:
+                if isinstance(error, urllib.error.URLError) and not isinstance(error.reason, TimeoutError):
+                    raise
                 if latest is not None:
                     return latest
                 raise TimeoutError(f"媒体等待超时，后台继续；用 operation {task_id} {operation_id} 继续查询") from None
