@@ -16,12 +16,13 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from pydantic import BaseModel, Field, model_validator
 
 from .acquisition import MediaDownloader, MediaSource
-from .frame_extractor import extract_frame
+from .frame_extractor import extract_frame_isolated
 from .service_mcp import create_mcp
 from .service_pipeline import Pipeline, platform_url
 from .service_settings import Settings
-from .service_video import prepare_video, retained_video
+from .service_video import fingerprint, media_manifest, prepare_video, retained_file, retained_video
 from .jobs import Jobs
+from .media_jobs import MediaJobs
 from .materials import is_material_name, material_names
 from .task_store import TaskStore, atomic_json, public_error
 from .transcript import MaterialError, TranscriptSegment, read_transcript, segments_to_prompt, segments_to_srt
@@ -45,6 +46,11 @@ class TranscribeRequest(BaseModel):
 
 class FramesRequest(BaseModel):
     timestamps: list[float] = Field(min_length=1, max_length=24)
+    background: bool = False
+
+
+class MediaRequest(BaseModel):
+    purpose: Literal["video"]
 
 
 
@@ -53,14 +59,25 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
     store = TaskStore(config.workspace / "tasks")
     runtime_pipeline = pipeline if pipeline is not None else Pipeline(config, store)
     backend = runtime_pipeline.backend
-    jobs = Jobs(store, runtime_pipeline)
-    frame_locks: dict[str, asyncio.Lock] = {}
-    video_locks: dict[str, asyncio.Lock] = {}
+    gate = asyncio.Lock()
+    jobs = Jobs(store, runtime_pipeline, gate=gate)
+    media_jobs = MediaJobs(store, runtime_pipeline, gate)
 
     def public_task(task: dict) -> dict:
         directory = store.directory(task["task_id"])
         available = (directory.resolve().parent == store.root and retained_video(directory, task) is not None)
-        return {**task, "downloads": {"video": f"/api/task/{task['task_id']}/video"} if available else {}}
+        manifest = media_manifest(directory)
+        if manifest:
+            download = retained_file(directory, manifest.get("download"))
+            available = (download is not None and type(manifest.get("source_has_audio")) is bool
+                         and manifest.get("fingerprints", {}).get("download") == fingerprint(download))
+            for kind in ("video", "audio"):
+                if kind in manifest:
+                    path = retained_file(directory, manifest[kind])
+                    available = bool(available and path is not None
+                                     and manifest.get("fingerprints", {}).get(kind) == fingerprint(path))
+        return {**task, "downloads": {"video": f"/api/task/{task['task_id']}/video"} if available else {},
+                "media_operations": media_jobs.summaries(task["task_id"])}
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -71,16 +88,18 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
                 raise RuntimeError("Workspace already in use; run exactly one service worker") from exc
             await asyncio.to_thread(backend.health)
             await jobs.start()
+            await media_jobs.start()
             try:
                 async with remote_mcp.session_manager.run():
                     yield
             finally:
-                await jobs.stop()
+                await asyncio.gather(jobs.stop(), media_jobs.stop())
 
     app = FastAPI(title="FrameNote", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     remote_mcp = create_mcp(app=app)
     mcp_app = remote_mcp.streamable_http_app()
     app.state.store, app.state.jobs, app.state.backend = store, jobs, backend
+    app.state.media_jobs, app.state.gate = media_jobs, gate
 
     @app.exception_handler(KeyError)
     async def not_found(request: Request, error: KeyError):
@@ -156,7 +175,7 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
 
     @app.get("/api/task/{task_id}/video")
     async def video(task_id: str, request: Request):
-        async with video_locks.setdefault(task_id, asyncio.Lock()):
+        async with gate:
             task = store.get(task_id)
             directory = store.directory(task_id)
             if directory.resolve().parent != store.root or retained_video(directory, task) is None:
@@ -199,25 +218,55 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
             result["content"] = segments_to_prompt(objects) if output_format == "markdown" else segments_to_srt(objects)
         return result
 
+    def operation_response(value: dict) -> JSONResponse:
+        return JSONResponse(value, status_code=200 if value["status"] in {"completed", "failed", "cancelled"} else 202)
+
+    @app.post("/api/task/{task_id}/media")
+    async def media(task_id: str, body: MediaRequest):
+        return operation_response(media_jobs.enqueue_video(task_id))
+
+    @app.get("/api/task/{task_id}/operations/{operation_id}")
+    async def operation(task_id: str, operation_id: str,
+                        wait: float = Query(0, ge=0, le=45, allow_inf_nan=False)):
+        return await media_jobs.get(task_id, operation_id, wait=wait)
+
+    @app.post("/api/task/{task_id}/operations/{operation_id}/cancel")
+    async def cancel_operation(task_id: str, operation_id: str):
+        return media_jobs.cancel(task_id, operation_id)
+
+    @app.post("/api/task/{task_id}/operations/{operation_id}/retry")
+    async def retry_operation(task_id: str, operation_id: str):
+        try:
+            return operation_response(media_jobs.retry(task_id, operation_id))
+        except ValueError as error:
+            raise HTTPException(409, str(error)) from error
+
     @app.post("/api/task/{task_id}/frames")
     async def frames(task_id: str, body: FramesRequest):
-        async with frame_locks.setdefault(task_id, asyncio.Lock()):
-            task = store.get(task_id)
-            video = task.get("assets", {}).get("video")
-            if not video:
-                raise HTTPException(409, "Source video is not ready")
-            if any(not math.isfinite(t) or t < 0 or t >= task["duration"] for t in body.timestamps):
-                raise HTTPException(422, "Frame timestamps must be within the video duration")
+        task = store.get(task_id)
+        if any(not math.isfinite(t) or t < 0 or t >= task.get("duration", 0) for t in body.timestamps):
+            raise HTTPException(422, "Frame timestamps must be within the video duration")
+        if body.background:
+            return operation_response(media_jobs.enqueue_frames(task_id, body.timestamps))
+        async with gate:
             directory = store.directory(task_id)
+            video = retained_video(directory, store.get(task_id))
+            if video is None:
+                raise HTTPException(409, {"code": "media_preparation_required", "message": "Source video is not ready"})
             index_path = directory / "frames.json"
+            if index_path.is_symlink() or (directory / "frames").is_symlink():
+                raise HTTPException(409, "Invalid frame storage")
             index = json.loads(index_path.read_text()) if index_path.is_file() else []
             generated = []
             for timestamp in body.timestamps:
                 frame_id = uuid.uuid4().hex
                 try:
-                    item = await asyncio.to_thread(extract_frame, directory / video, directory / "frames" / f"{frame_id}.jpg", timestamp)
+                    item = await extract_frame_isolated(video, directory / "frames" / f"{frame_id}.jpg", timestamp,
+                                                        timeout=config.process_timeout)
                 except (ValueError, RuntimeError) as error:
                     raise HTTPException(422, public_error(error)) from error
+                except (TimeoutError, asyncio.TimeoutError) as error:
+                    raise HTTPException(504, "Frame extraction timed out") from error
                 item.update(frame_id=frame_id, url=f"/api/task/{task_id}/frames/{frame_id}")
                 index.append(item)
                 generated.append(item)
@@ -230,7 +279,7 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
         if len(frame_id) != 32 or any(c not in "0123456789abcdef" for c in frame_id):
             raise HTTPException(404, "Frame not found")
         path = store.directory(task_id) / "frames" / f"{frame_id}.jpg"
-        if not path.is_file():
+        if path.parent.is_symlink() or path.is_symlink() or not path.is_file():
             raise HTTPException(404, "Frame not found")
         return FileResponse(path, media_type="image/jpeg")
 

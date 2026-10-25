@@ -42,7 +42,10 @@ class TaskStore:
     def directory(self, task_id: str) -> Path:
         if not re.fullmatch(r"[0-9a-f]{32}", task_id):
             raise KeyError("Invalid task id")
-        return self.root / task_id
+        path = self.root / task_id
+        if path.is_symlink() or path.resolve().parent != self.root:
+            raise KeyError("Invalid task directory")
+        return path
 
     def create(self, **values: Any) -> dict:
         task_id = uuid.uuid4().hex
@@ -53,7 +56,10 @@ class TaskStore:
 
     def get(self, task_id: str) -> dict:
         try:
-            return json.loads((self.directory(task_id) / "task.json").read_text())
+            path = self.directory(task_id) / "task.json"
+            if path.is_symlink():
+                raise KeyError("Invalid task manifest")
+            return json.loads(path.read_text())
         except FileNotFoundError as exc:
             raise KeyError("Task not found") from exc
 
@@ -73,7 +79,10 @@ class TaskStore:
         for path in self.root.glob("*/task.json"):
             if not re.fullmatch(r"[0-9a-f]{32}", path.parent.name):
                 continue
-            tasks.append(self.get(path.parent.name))
+            try:
+                tasks.append(self.get(path.parent.name))
+            except KeyError:
+                continue
         return sorted(tasks, key=lambda t: t["created_at"], reverse=True)
 
     def recover(self) -> list[str]:

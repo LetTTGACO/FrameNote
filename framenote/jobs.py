@@ -9,8 +9,9 @@ from .task_store import TERMINAL, TaskStore, public_error
 
 
 class Jobs:
-    def __init__(self, store: TaskStore, pipeline: Pipeline):
+    def __init__(self, store: TaskStore, pipeline: Pipeline, *, gate: asyncio.Lock | None = None):
         self.store, self.pipeline = store, pipeline
+        self.gate = gate if gate is not None else asyncio.Lock()
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.active: asyncio.Task | None = None
         self.active_id: str | None = None
@@ -28,21 +29,22 @@ class Jobs:
         while True:
             task_id = await self.queue.get()
             try:
-                if self.store.get(task_id)["status"] != "queued":
-                    continue
-                self.active_id = task_id
-                self.store.update(task_id, status="processing")
-                self.active = asyncio.create_task(self.pipeline.run(task_id, lambda: self.store.get(task_id)["status"] == "cancelled" or self.stopping))
-                try:
-                    await self.active
-                except asyncio.CancelledError:
-                    if self.stopping:
-                        self.store.update(task_id, status="failed", phase="interrupted", error={"code": "interrupted", "message": "服务停止，已保留材料。"})
-                        raise
-                    self.store.update(task_id, status="cancelled", phase="cancelled")
-                except Exception as error:
-                    phase = self.store.get(task_id)["phase"]
-                    self.store.update(task_id, status="failed", error={"code": error.code if isinstance(error, (ASRError, BilibiliInputError)) else phase + "_failed", "message": public_error(error)})
+                async with self.gate:
+                    if self.store.get(task_id)["status"] != "queued":
+                        continue
+                    self.active_id = task_id
+                    self.store.update(task_id, status="processing")
+                    self.active = asyncio.create_task(self.pipeline.run(task_id, lambda: self.store.get(task_id)["status"] == "cancelled" or self.stopping))
+                    try:
+                        await self.active
+                    except asyncio.CancelledError:
+                        if self.stopping:
+                            self.store.update(task_id, status="failed", phase="interrupted", error={"code": "interrupted", "message": "服务停止，已保留材料。"})
+                            raise
+                        self.store.update(task_id, status="cancelled", phase="cancelled")
+                    except Exception as error:
+                        phase = self.store.get(task_id)["phase"]
+                        self.store.update(task_id, status="failed", error={"code": error.code if isinstance(error, (ASRError, BilibiliInputError)) else phase + "_failed", "message": public_error(error)})
             finally:
                 self.active = None
                 self.active_id = None

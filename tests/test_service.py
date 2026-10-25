@@ -662,3 +662,117 @@ async def test_prepare_video_reads_media_manifest_and_requires_audio(tmp_path, v
     with pytest.raises(RuntimeError, match='audio_unavailable'):
         await prepare_video(tmp_path, {}, timeout=30)
     assert await prepare_video(tmp_path, {}, timeout=30, source_has_audio=False) == source
+
+
+def test_background_frames_media_lifecycle_and_get_video_no_network(tmp_path, video, monkeypatch):
+    calls = []
+    async def prepare(self, task_id, *, require_audio, cancelled):
+        calls.append(require_audio)
+        path = self.store.directory(task_id) / 'source.mp4'
+        path.write_bytes(video.read_bytes())
+        from framenote.service_video import fingerprint
+        atomic_json(path.parent / 'media.json', {'video': path.name, 'download': path.name,
+                    'source_has_audio': True, 'fingerprints': {'video': fingerprint(path), 'download': fingerprint(path)}})
+        return path
+    monkeypatch.setattr(Pipeline, 'prepare_media', prepare)
+    with client_for(config(tmp_path / 'workspace')) as client:
+        task_id = finished_task(client.app.state.store)
+        base = f'/api/task/{task_id}'
+        assert client.get(base + '/video').status_code == 409
+        assert calls == []
+        missing = client.post(base + '/frames', json={'timestamps': [1]})
+        assert missing.status_code == 409 and missing.json()['detail']['code'] == 'media_preparation_required'
+        response = client.post(base + '/frames', json={'timestamps': [1.2], 'background': True})
+        assert response.status_code == 202
+        op = response.json()
+        route = base + '/operations/' + op['operation_id']
+        done = client.get(route, params={'wait': 45}).json()
+        assert done['status'] == 'completed'
+        assert abs(done['result']['frames'][0]['actual_time'] - 1.2) < .041
+        cached = client.post(base + '/frames', json={'timestamps': [1.2], 'background': True})
+        assert cached.status_code == 200 and cached.json() == done
+        assert client.get(route, params={'wait': 46}).status_code == 422
+        assert client.get(route, params={'wait': 'nan'}).status_code == 422
+        other = finished_task(client.app.state.store)
+        assert client.get(f'/api/task/{other}/operations/' + op['operation_id']).status_code == 404
+        media = client.post(base + '/media', json={'purpose': 'video'})
+        assert media.status_code == 202
+        assert client.get(base + '/operations/' + media.json()['operation_id'], params={'wait': 45}).json()['status'] == 'completed'
+        count = len(calls)
+        assert client.get(base + '/video').status_code == 200 and len(calls) == count
+        assert client.get(base).json()['status'] == 'completed'
+        assert client.get(base).json()['media_operations']
+        assert client.post(base + '/frames', json={'timestamps': [5], 'background': True}).status_code == 422
+
+
+def test_media_cancel_retry_and_verified_download_advertisement(tmp_path, video, monkeypatch):
+    from framenote.service_video import fingerprint
+    async def prepare(self, task_id, *, require_audio, cancelled):
+        raise RuntimeError('audio_unavailable')
+    monkeypatch.setattr(Pipeline, 'prepare_media', prepare)
+    with client_for(config(tmp_path / 'workspace')) as client:
+        task_id = finished_task(client.app.state.store, video)
+        directory = client.app.state.store.directory(task_id)
+        base = f'/api/task/{task_id}'
+        before = (directory / 'task.json').read_bytes(), (directory / 'transcript.json').read_bytes()
+        source = directory / 'source.mp4'
+        manifest = {'video': source.name, 'source_has_audio': None, 'fingerprints': {'video': fingerprint(source)}}
+        atomic_json(directory / 'media.json', manifest)
+        assert client.get(base).json()['downloads'] == {}
+        op = client.post(base + '/media', json={'purpose': 'video'}).json()
+        route = base + '/operations/' + op['operation_id']
+        failed = client.get(route, params={'wait': 45}).json()
+        assert failed['status'] == 'failed' and failed['error']['code'] == 'audio_unavailable'
+        assert client.post(route + '/cancel').json() == failed
+        retry = client.post(route + '/retry')
+        assert retry.status_code == 202 and retry.json()['retry_of'] == op['operation_id']
+        assert retry.json()['operation_id'] != op['operation_id']
+        assert client.get(base + '/operations/' + retry.json()['operation_id'], params={'wait': 45}).json()['status'] == 'failed'
+        manifest.update(download=source.name, source_has_audio=False)
+        manifest['fingerprints']['download'] = fingerprint(source)
+        atomic_json(directory / 'media.json', manifest)
+        assert client.get(base).json()['downloads'] == {'video': base + '/video'}
+        source.write_bytes(b'changed')
+        assert client.get(base).json()['downloads'] == {}
+        assert ((directory / 'task.json').read_bytes(), (directory / 'transcript.json').read_bytes()) == before
+
+
+@pytest.mark.asyncio
+async def test_legacy_frames_video_and_background_media_use_one_gate(tmp_path, video, monkeypatch):
+    import httpx
+    app = create_app(config(tmp_path / 'workspace'))
+    active = maximum = 0
+    async def heavy():
+        nonlocal active, maximum
+        assert app.state.gate.locked()
+        active += 1
+        maximum = max(maximum, active)
+        try:
+            await asyncio.sleep(.02)
+        finally:
+            active -= 1
+    async def extract(source, output, seconds, *, timeout):
+        await heavy()
+        output.parent.mkdir(exist_ok=True)
+        output.write_bytes(b'frame')
+        return {'requested_time': seconds, 'actual_time': seconds, 'bytes': 5}
+    async def prepare_video(directory, task, timeout):
+        await heavy()
+        return directory / 'source.mp4'
+    async def prepare_media(self, task_id, **kwargs):
+        await heavy()
+        return self.store.directory(task_id) / 'source.mp4'
+    monkeypatch.setattr('framenote.service.extract_frame_isolated', extract)
+    monkeypatch.setattr('framenote.service.prepare_video', prepare_video)
+    monkeypatch.setattr(Pipeline, 'prepare_media', prepare_media)
+    async with app.router.lifespan_context(app):
+        task_id = finished_task(app.state.store, video)
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+            base = f'/api/task/{task_id}'
+            responses = await asyncio.gather(client.post(base + '/frames', json={'timestamps': [1]}),
+                                             client.get(base + '/video'),
+                                             client.post(base + '/media', json={'purpose': 'video'}))
+            assert [response.status_code for response in responses] == [200, 200, 202]
+            op = responses[-1].json()
+            assert (await client.get(base + '/operations/' + op['operation_id'], params={'wait': 45})).json()['status'] == 'completed'
+            assert maximum == 1

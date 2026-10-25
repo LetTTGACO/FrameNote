@@ -41,3 +41,42 @@ def extract_frame(video: Path, output: Path, seconds: float) -> dict:
     return {"requested_time": seconds, "actual_time": round(actual, 6),
             "timestamp_kind": "decoded_frame_pts", "bytes": output.stat().st_size,
             "sha256": hashlib.sha256(output.read_bytes()).hexdigest()}
+
+
+async def extract_frame_isolated(video: Path, output: Path, seconds: float, *, timeout: float) -> dict:
+    """Publish a frame only after its entire decoder process has been reaped."""
+    import json
+    import os
+    import sys
+    import uuid
+    from .service_process import run_process
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    pending = output.with_name(f'.{output.stem}.{uuid.uuid4().hex}.pending.jpg')
+    environment = os.environ.copy()
+    environment["PYTHONPATH"] = str(Path(__file__).resolve().parents[1])
+    try:
+        raw = await run_process([sys.executable, '-m', 'framenote.frame_extractor',
+                                 '--video', str(video), '--output', str(pending),
+                                 '--seconds', str(seconds)], timeout=timeout, env=environment)
+        result = json.loads(raw)
+        pending.replace(output)
+        return result
+    finally:
+        pending.unlink(missing_ok=True)
+        pending.with_suffix('.tmp').unlink(missing_ok=True)
+
+
+def main() -> None:
+    import argparse
+    import json
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--video', required=True, type=Path)
+    parser.add_argument('--output', required=True, type=Path)
+    parser.add_argument('--seconds', required=True, type=float)
+    args = parser.parse_args()
+    print(json.dumps(extract_frame(args.video, args.output, args.seconds), allow_nan=False))
+
+
+if __name__ == '__main__':
+    main()
