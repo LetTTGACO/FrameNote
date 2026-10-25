@@ -6,6 +6,8 @@ from email.utils import parsedate_to_datetime
 from http.client import HTTPException, HTTPResponse
 import json
 import math
+import socket
+import threading
 import time
 from typing import Any, cast
 import urllib.error
@@ -63,6 +65,79 @@ def _remaining(deadline: float) -> float:
     if not math.isfinite(remaining) or remaining <= 0:
         raise _error('deadline_exceeded')
     return remaining
+
+
+class _DeadlineResponse:
+    """Keep the opening budget for all body reads, including a drip stream."""
+
+    def __init__(self, response: HTTPResponse, deadline: float):
+        self._response = response
+        self._deadline = deadline
+        self._expired = threading.Event()
+        # HTTPResponse keeps the live socket here, including HTTPS sockets.
+        self._socket = getattr(getattr(getattr(response, 'fp', None), 'raw', None), '_sock', None)
+        try:
+            remaining = _remaining(deadline)
+        except BilibiliHTTPError:
+            response.close()
+            raise
+        self._timer = threading.Timer(remaining, self._abort)
+        self._timer.daemon = True
+        self._timer.start()
+
+    def _abort(self) -> None:
+        self._expired.set()
+        if self._socket is not None:
+            # close() alone may wait for the buffered reader's lock. shutdown()
+            # interrupts its recv even when chunk framing drips indefinitely.
+            try:
+                self._socket.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+
+    def _check(self) -> float:
+        if self._expired.is_set():
+            raise _error('deadline_exceeded')
+        return _remaining(self._deadline)
+
+    def read1(self, size: int = -1) -> bytes:
+        remaining = self._check()
+        if self._socket is not None and self._response.fp is not None:
+            self._socket.settimeout(remaining)
+        reader = getattr(self._response, 'read1', self._response.read)
+        try:
+            chunk = reader(min(size, 65536) if size >= 0 else 65536)
+        except (OSError, HTTPException):
+            self._check()
+            raise
+        self._check()
+        if not chunk:
+            self._timer.cancel()
+        return cast(bytes, chunk)
+
+    def read(self, size: int = -1) -> bytes:
+        chunks: list[bytes] = []
+        left = size
+        self._check()
+        while left != 0:
+            chunk = self.read1(left)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            if left > 0:
+                left -= len(chunk)
+        self._check()
+        return b''.join(chunks)
+
+    def close(self) -> None:
+        self._timer.cancel()
+        self._response.close()
+
+    def __enter__(self) -> _DeadlineResponse:
+        return self
+
+    def __exit__(self, *args: Any) -> None:
+        self.close()
 
 
 def _http_error(exc: urllib.error.HTTPError) -> BilibiliHTTPError:
@@ -138,8 +213,10 @@ class BilibiliHTTP:
             headers['Cookie'] = '; '.join(f'{name}={value}' for name, value in self._credentials.cookies.items())
         for attempt in range(3):
             try:
-                with open_bilibili(urllib.request.Request(url, headers=headers), timeout=min(20, _remaining(self._deadline))) as response:
-                    body = response.read()
+                attempt_deadline = min(self._deadline, time.monotonic() + 20)
+                response = open_bilibili(urllib.request.Request(url, headers=headers), timeout=_remaining(attempt_deadline))
+                with _DeadlineResponse(response, attempt_deadline) as bounded_response:
+                    body = bounded_response.read()
                 _remaining(self._deadline)
                 return body
             except (urllib.error.URLError, OSError, HTTPException):

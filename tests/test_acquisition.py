@@ -473,3 +473,25 @@ def test_legacy_bilibili_media_body_failure_is_redacted_and_partial_is_cleaned(t
         MediaDownloader(tmp_path)._download_direct_media('https://cn.bilivideo.com/audio', target, _BILI_URL, {'sessdata': 'secret'}, user_agent=MediaDownloader.BILI_USER_AGENT)
     assert 'secret' not in str(error.value)
     assert not target.exists() and not target.with_name('audio.m4a.part').exists()
+
+
+def test_legacy_bulk_media_keeps_socket_timeout_without_new_whole_body_limit(tmp_path, monkeypatch):
+    import io
+    clock = {'now': 100.0}
+    class SlowMedia(io.BytesIO):
+        def read(self, size=-1):
+            clock['now'] += 61
+            return super().read(size)
+        def read1(self, size=-1):
+            clock['now'] += 61
+            return super().read1(size)
+    class FakeOpener:
+        def open(self, request, timeout):
+            assert timeout == 60
+            return SlowMedia(b'media')
+    monkeypatch.setattr('framenote.platform_http.time.monotonic', lambda: clock['now'])
+    monkeypatch.setattr('framenote.platform_http.urllib.request.build_opener', lambda *args: FakeOpener())
+    target = tmp_path / 'audio.m4a'
+    result = MediaDownloader(tmp_path)._download_direct_media('https://cn.bilivideo.com/audio', target, _BILI_URL, None, user_agent=MediaDownloader.BILI_USER_AGENT)
+    assert result == target and result.read_bytes() == b'media'
+    assert clock['now'] > 160

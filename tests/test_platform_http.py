@@ -245,7 +245,7 @@ def test_invalid_transport_headers_never_echo_credentials(transport, failure):
 def test_http_protocol_body_failures_are_classified_and_bounded(transport):
     from http.client import HTTPException
     class BrokenResponse(Response):
-        def read(self):
+        def read1(self, size=-1):
             raise HTTPException('SESSDATA=secret')
     transport.outcomes = [BrokenResponse(), BrokenResponse(), BrokenResponse()]
     with pytest.raises(BilibiliHTTPError) as error:
@@ -254,3 +254,121 @@ def test_http_protocol_body_failures_are_classified_and_bounded(transport):
     assert 'secret' not in str(error.value)
     assert len(transport.requests) == 3
     assert transport.sleeps == [1, 2]
+
+
+@pytest.mark.parametrize('stage_deadline, chunk_seconds, expected_reads', [(160, 7, 3), (105, 2, 3)])
+def test_streaming_body_stops_at_earlier_attempt_or_stage_deadline(transport, stage_deadline, chunk_seconds, expected_reads):
+    class DripResponse(Response):
+        def __init__(self):
+            super().__init__()
+            self.reads = 0
+        def read1(self, size=-1):
+            self.reads += 1
+            transport.now += chunk_seconds
+            return b'x'
+        def read(self, size=-1):
+            # An unbounded read can consume a drip stream longer than its budget.
+            transport.now += 21
+            self.reads += 10
+            return b'x' * 10
+    response = DripResponse()
+    transport.outcomes = [response]
+    with pytest.raises(BilibiliHTTPError) as error:
+        BilibiliHTTP(None, deadline=stage_deadline).download('https://i0.hdslb.com/body', referer='https://www.bilibili.com/')
+    assert error.value.code == 'deadline_exceeded'
+    assert response.reads == expected_reads
+    assert response.closed
+    assert len(transport.requests) == 1
+    assert transport.sleeps == []
+
+
+def test_open_and_redirect_time_is_not_reset_for_body_read(transport):
+    class SlowBody(Response):
+        def read1(self, size=-1):
+            transport.now += 3
+            return b'x'
+        def read(self, size=-1):
+            transport.now += 3
+            return b'x'
+    response = SlowBody()
+    def opening(request, timeout):
+        transport.requests.append(request)
+        transport.timeouts.append(timeout)
+        transport.now += 9
+        if len(transport.requests) == 1:
+            raise http_error(302, 'https://i0.hdslb.com/body')
+        return response
+    transport.open = opening
+    with pytest.raises(BilibiliHTTPError) as error:
+        BilibiliHTTP(None, deadline=160).download('https://api.bilibili.com/body', referer='https://www.bilibili.com/')
+    assert error.value.code == 'deadline_exceeded'
+    assert transport.timeouts == [20, 11]
+    assert response.closed
+
+
+def test_absolute_body_deadline_interrupts_real_socket_drip(transport):
+    from http.client import HTTPResponse
+    import socket
+    import threading
+    import time
+    receiver, sender = socket.socketpair()
+    stop = threading.Event()
+    sender.sendall(b'HTTP/1.0 200 OK\r\nContent-Type: application/octet-stream\r\n\r\n')
+    response = HTTPResponse(receiver)
+    response.begin()
+    transport.outcomes = [response]
+    def drip():
+        try:
+            # Every receive has progress well within the socket timeout.
+            for _ in range(200):
+                if stop.wait(0.01):
+                    break
+                sender.sendall(b'x')
+        except OSError:
+            pass
+        finally:
+            sender.close()
+    producer = threading.Thread(target=drip, daemon=True)
+    producer.start()
+    started = time.perf_counter()
+    try:
+        with pytest.raises(BilibiliHTTPError) as error:
+            BilibiliHTTP(None, deadline=100.1).download('https://i0.hdslb.com/body', referer='https://www.bilibili.com/')
+        assert error.value.code == 'deadline_exceeded'
+        assert time.perf_counter() - started < 1.0
+        assert response.isclosed()
+        assert len(transport.requests) == 1
+    finally:
+        stop.set()
+        receiver.close()
+        producer.join(timeout=1)
+
+
+def test_bounded_body_accepts_completed_content_length_response(transport):
+    from http.client import HTTPResponse
+    import socket
+    receiver, sender = socket.socketpair()
+    try:
+        sender.sendall(b'HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\n{}')
+        response = HTTPResponse(receiver)
+        response.begin()
+        # urllib closes its connection reference while the response owns makefile.
+        receiver.close()
+        transport.outcomes = [response]
+        assert BilibiliHTTP(None, deadline=160).get_json('https://api.bilibili.com/x') == {}
+        assert response.isclosed()
+    finally:
+        receiver.close()
+        sender.close()
+
+
+def test_body_cancellation_propagates_and_closes_response(transport):
+    class CancelledResponse(Response):
+        def read1(self, size=-1):
+            raise asyncio.CancelledError()
+    response = CancelledResponse()
+    transport.outcomes = [response]
+    with pytest.raises(asyncio.CancelledError):
+        BilibiliHTTP(None, deadline=160).get_json('https://api.bilibili.com/x')
+    assert response.closed
+    assert len(transport.requests) == 1 and transport.sleeps == []
