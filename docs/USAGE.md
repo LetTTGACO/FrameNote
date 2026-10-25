@@ -15,7 +15,7 @@
 
 ## 提交视频
 
-每个任务使用独立的笔记根目录。按以下步骤获取一份材料：
+每个任务使用独立的任务工作区，默认也作为笔记根目录。客户端下载材料到 `materials/`，Agent 阅读后撰写阅读文档。按以下步骤获取一份材料：
 
 1. 提交视频并等待处理：
 
@@ -47,6 +47,8 @@ B站显式强制语音识别可在 `transcribe` 后加 `--force-asr`。文字可
 ## 继续已有任务
 
 从命令输出或 `materials/bundle.json` 获取任务 ID。后续示例中的 `TASK_ID` 均替换为这个 ID，并继续使用同一笔记根目录。
+
+使用任务清单中的服务地址显式设置 `--service-url SERVICE_URL`，保持任务 ID 与服务配对。原材料目录缺失时，可将同一任务取回新的空工作区，再依据已有笔记继续阅读和讨论。
 
 1. 检查任务状态：
 
@@ -133,9 +135,9 @@ python3 -S skills/framenote/scripts/headless.py fetch TASK_ID \
 
 媒体准备失败、取消或超时，以及下载失败时，客户端保留阅读稿和已有完整视频，并保持 `download_complete=false`；下载中断清理临时 `.part`。超时可用 `operation` 继续等待同一 ID。重试同一条 `fetch` 命令即可。关闭自动取回会保留已下载的视频。全局设置和单次覆盖见[视频取回配置](CONFIGURATION.md#视频取回配置)。
 
-## 工作区与原始材料
+## 材料获取与阅读文档
 
-完成 Skill 写作流程后的目录结构如下：
+客户端获取任务材料，Agent 直接撰写主笔记、分章原稿与必要的纠错记录。默认目录结构如下：
 
 ```text
 my-note/
@@ -159,60 +161,18 @@ my-note/
 
 `--out-dir` 始终表示笔记根目录。重取材料保留两份阅读文档、`corrections.md` 和已保存的视频；不同任务或不同服务不能复用已标记的材料目录。旧版根目录布局需要先整理到 `materials/`，或改用一个新目录。
 
-## 导出到 PersonalOS
-
-在配置的 `vault_dir` 中保存长期阅读内容，`--out-dir` 保持指向知识库外的材料工作区。处理新视频前先查找已有笔记：
-
-```bash
-python3 -S skills/framenote/scripts/headless.py find-note 'VIDEO_SOURCE'
-```
-
-找到原笔记时先阅读并继续维护。客户端按来源和常见平台视频标识匹配，保留 B站分 P，忽略已识别的分享追踪参数；不同短链仍需结合视频身份核对。
-
-新视频的 `notes.md`、`chapters-transcript.md` 和必要的 `materials/corrections.md` 由 Agent 按 Skill 写好后，执行：
-
-```bash
-python3 -S skills/framenote/scripts/headless.py export --out-dir ./my-note \
-  --title '视频笔记标题' --date 'YYYY-MM-DD' --author codex --tags 视频主题
-```
-
-日期使用用户时区，`--author` 是实际整理者，`--tags` 为少量主题标签。`--vault-dir` 可覆盖目标知识库。导出结果包含绝对 `note_path`、`transcript_path` 和复制的图片路径。目录布局如下：
-
-```text
-VAULT_DIR/
-├── 03_Bookmarks/Videos/YYYY-MM-DD-视频主题.md
-└── 08_Attachments/
-    ├── Files/FrameNote/YYYY-MM-DD-视频主题-原稿.md
-    └── Images/videos/YYYY-MM-DD-视频主题/00m11s.jpg
-```
-
-导出保留草稿 `date` 或旧版 `created` 作为首次整理日期，缺少时使用 `--date`；`updated` 使用本次日期。frontmatter 包含 `title`、`date`、`updated`、`source`、`type`、`status`、`tags`、`source_url`、`framenote_task_id` 和 `framenote_service_url`。主笔记为 `type: summary`，原稿为 `type: note`。`source_url` 优先取草稿，缺少时取任务的原视频 URL；本地视频应在草稿中记录原文件绝对路径。
-
-草稿使用相对 Markdown 链接。客户端转换主笔记与原稿之间的链接，将 HTML 章节锚点映射到实际标题；纠错记录合并到原稿末尾的“识别纠错与疑点”。截图按索引 `actual_time` 命名，同秒多图追加序号，只复制阅读文档或纠错中引用的截图；代码示例保持原样。外部资料链接保持标准 Markdown，库内链接转换为 vault 相对 Wikilink。原始 JSON、字幕、视频和下载清单留在材料工作区。原始材料链接需在草稿中改为来源说明或任务回查，导出前校验文件与章节链接。
-
-已有同视频笔记时返回 `existing: true` 和原入口，原笔记、原稿与图片保持原样。直接在知识库原笔记中继续讨论，追加截图时复制所引用图片到原目录并维护 Wikilink。不同视频标题重名时自动追加稳定任务后缀，已有文件保留。缺图、断链或未完成任务在写入前报错，写入失败仅清理本次新建的文件。
-
-从已有知识库笔记读取任务入口：
-
-```bash
-python3 -S skills/framenote/scripts/headless.py note-context 'NOTE_PATH'
-```
-
-返回 `task_id` 与 `service_url`，后续 `status`、`transcript`、`frames`、`fetch` 命令显式使用该服务地址。原工作区缺失时可向新的空工作区重新 `fetch`；阅读、分章原稿和精选截图已在知识库中独立保存，额外取材依赖原服务保留任务。
+继续讨论时局部维护已有笔记，保留首次创建日期、用户新增属性和讨论内容；实质修订更新 `updated`。用户指定其他文档位置或格式时，Agent 遵循目标目录规则，核对图片、原稿和任务入口的引用。
 
 ## 客户端命令参考
 
-所有子命令接受 `--service-url`、`--notes-dir`、`--vault-dir`、`--download-video` 和 `--no-download-video`；参数可放在子命令前后。完整调用格式可用 `--help` 查看。
+所有子命令接受 `--service-url`、`--notes-dir`、`--download-video` 和 `--no-download-video`；参数可放在子命令前后。完整调用格式可用 `--help` 查看。
 
 各命令的用途和专用参数如下。`TASK_ID` 表示任务 ID，`SOURCE` 表示链接或本地路径，`DIR` 表示笔记根目录，`SECONDS` 表示秒数，`N` 表示整数：
 
 | 命令 | 参数 | 结果 |
 | --- | --- | --- |
 | `config` | 无专用参数 | 显示生效配置及字段来源 |
-| `notes-dir` | 无专用参数 | 显示材料父目录与知识库根目录 |
-| `find-note SOURCE` | 原视频链接或本地视频路径 | 返回匹配的知识库笔记与任务身份 |
-| `note-context NOTE_PATH` | 主笔记路径 | 返回新 frontmatter 或旧版 bundle 中的任务 ID 与服务地址 |
-| `export` | `--out-dir DIR`、`--title TITLE`、`--date YYYY-MM-DD` 必填；`--author` 默认 `codex`；`--tags` 可选 | 导出主笔记、完整原稿与精选截图，保留已有视频笔记 |
+| `notes-dir` | 无专用参数 | 显示任务工作区父目录 |
 | `health` | 无专用参数 | 显示服务活性和后端状态 |
 | `transcribe SOURCE` | `--out-dir DIR` 必填；`--wait SECONDS` 默认 `1800`；`--force-asr` 强制语音识别 | 提交、等待并取回已生成材料 |
 | `tasks` | `--offset N` 默认 `0`；`--limit N` 默认 `20`，最大 `100` | 分页列出任务 |
@@ -226,6 +186,6 @@ python3 -S skills/framenote/scripts/headless.py note-context 'NOTE_PATH'
 | `operation TASK_ID OP_ID` | `--wait SECONDS` 默认 `45`，可为 `0` | 按操作 ID 等待并返回公开操作 |
 | `cancel-operation TASK_ID OP_ID` | 无专用参数 | 取消媒体操作 |
 
-完成材料获取后，按[Skill 写作流程](../skills/framenote/SKILL.md)生成、检查并导出两份阅读文档。
+完成材料获取后，按[Skill 写作流程](../skills/framenote/SKILL.md)生成并检查两份阅读文档。
 
 Python 调用时，`Client.wait_operation(task_id, operation_id, timeout=...)` 返回公开操作字典，超时可返回最新非终态；无响应超时会报告操作 ID。`request_frames(task_id, timestamps, timeout=1800)` 和 `prepare_video(task_id, timeout=1800)` 返回完成的公开操作；失败或取消抛出含原因和 ID 的 `RuntimeError`，超时抛出含 ID 的 `TimeoutError`，后台继续。截图在 `result.frames`，视频入口在 `result.downloads`。`fetch(..., media_wait=1800)` 的等待独立于文字任务状态。客户端仅使用标准库，可复制脚本后以 `python3 -S` 在项目外运行。材料版本接受 1/2/3，清单版本为 `max(2, manifest.schema_version)`，未来版本在写入前拒绝。

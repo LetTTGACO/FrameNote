@@ -113,8 +113,7 @@ FRAMENOTE_GALAXY_ENABLED=true
 | 字段 | 默认值 | 含义与约束 |
 | --- | --- | --- |
 | `service_url` | `http://127.0.0.1:18121` | 非空 HTTP 或 HTTPS 基址，不含凭据、查询参数或片段 |
-| `notes_dir` | 按工作目录推导 | 材料工作区与草稿的父目录；支持 `~`，相对路径按配置文件所在目录解析 |
-| `vault_dir` | `~/workspace/PersonalOS` | PersonalOS 知识库根目录，须已存在；支持 `~`，相对路径按配置文件所在目录解析 |
+| `notes_dir` | 按工作目录推导 | 任务工作区父目录；材料下载到 `materials/`，阅读文档由 Agent 撰写；相对路径按配置文件所在目录解析，支持 `~` |
 | `download_video` | `false` | 是否自动取回视频，须为 JSON 布尔值 |
 
 例如，在工作项目中创建 `.framenote.json`：
@@ -123,12 +122,11 @@ FRAMENOTE_GALAXY_ENABLED=true
 {
   "service_url": "http://SERVER:18121",
   "notes_dir": "./video-notes",
-  "vault_dir": "~/workspace/PersonalOS",
   "download_video": false
 }
 ```
 
-将 `SERVER` 替换为客户端可达的服务器主机名或 IP 地址。该配置把材料工作区父目录设为配置文件旁的 `video-notes/`，将阅读笔记导出到指定知识库。未知字段、类型错误和无效 JSON 都会报错。
+将 `SERVER` 替换为客户端可达的服务器主机名或 IP 地址。该配置把笔记父目录设为配置文件旁的 `video-notes/`。未知字段、类型错误和无效 JSON 都会报错。
 
 配置逐字段覆盖，优先级从高到低为：
 
@@ -146,7 +144,6 @@ FRAMENOTE_GALAXY_ENABLED=true
 | --- | --- | --- |
 | `service_url` | `--service-url` | `FRAMENOTE_SERVICE_URL` |
 | `notes_dir` | `--notes-dir` | `FRAMENOTE_NOTES_DIR` |
-| `vault_dir` | `--vault-dir` | `FRAMENOTE_VAULT_DIR` |
 | `download_video` | `--download-video`、`--no-download-video` | `FRAMENOTE_DOWNLOAD_VIDEO` |
 
 命令行参数可位于子命令前后。`FRAMENOTE_DOWNLOAD_VIDEO` 接受 `true/false`、`yes/no`、`1/0`、`on/off`，不区分大小写，并忽略两端空白。命令行或环境变量中的相对目录按执行目录解析。
@@ -169,7 +166,7 @@ FRAMENOTE_GALAXY_ENABLED=true
    python3 -S 'SKILL_DIR/scripts/headless.py' notes-dir
    ```
 
-   使用同一个 `SKILL_DIR`。确认 `notes_directory` 指向材料父目录，`vault_directory` 指向知识库根目录。
+   使用同一个 `SKILL_DIR`。确认输出中的 `notes_directory` 为预期目录。
 
 未配置 `notes_dir` 时，脚本按以下规则选择目录：
 
@@ -177,7 +174,7 @@ FRAMENOTE_GALAXY_ENABLED=true
 - 在其他 Git 项目中，使用仓库根目录的 `framenote-notes/`。
 - 在非 Git 目录中，使用执行目录下的 `framenote-notes/`。
 
-`notes_dir` 是供工作流选择工作区的父目录。下载命令仍须用 `--out-dir` 显式指定本次任务的工作区；材料写入它的 `materials/` 子目录。知识库持久内容通过 `export` 写入 `vault_dir`，工作区须位于知识库外。`find-note` 查找已有视频笔记，`note-context` 从新笔记字段或旧版 `bundle` 入口回读任务 ID 与服务地址，后续网络命令用返回的 `--service-url` 访问原任务。详见[知识库导出](USAGE.md#导出到-personalos)。
+`notes_dir` 是供工作流选择任务工作区的父目录。下载命令须用 `--out-dir` 显式指定本次任务的工作区；材料写入它的 `materials/` 子目录。默认的两份阅读文档由 Agent 在笔记根目录撰写，用户指定其他位置时遵循其要求。继续已有任务时，从 `bundle.json` 读取任务 ID 与服务地址，使用 `--service-url` 访问原任务。
 
 ## 视频取回配置
 
