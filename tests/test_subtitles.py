@@ -247,3 +247,38 @@ def test_no_tracks_and_explicit_invalid_input_remain_distinct(identity, tmp_path
             raise BilibiliInputError('invalid_video_part', 'Invalid Bilibili part')
     with pytest.raises(BilibiliInputError):
         fetch_bilibili_subtitles(URL, tmp_path, client=Invalid(identity, [], {}))
+
+
+@pytest.mark.parametrize(('url', 'code'), [
+    pytest.param(URL + '?p=' + '9' * 5000, 'invalid_video_part', id='part'),
+    pytest.param('av' + '9' * 5000, 'invalid_video_url', id='bare-av'),
+    pytest.param('https://www.bilibili.com/video/av' + '9' * 5000, 'invalid_video_url', id='url-av'),
+])
+def test_integer_conversion_limit_is_typed_input_error_without_network(url, code):
+    import sys
+    if not hasattr(sys, 'set_int_max_str_digits'):
+        pytest.skip('This Python has no decimal integer conversion limit')
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        http = FakeHTTP()
+        with pytest.raises(BilibiliInputError) as error:
+            BilibiliClient(http).resolve(url)
+        assert error.value.code == code
+        assert http.calls == []
+    finally:
+        sys.set_int_max_str_digits(previous)
+
+
+@pytest.mark.parametrize('kind', ['part', 'av'])
+def test_supported_long_numeric_inputs_have_no_arbitrary_product_limit(kind):
+    value = int('9' * 100)
+    http = FakeHTTP()
+    if kind == 'part':
+        http.view['data']['pages'][0]['page'] = value
+        identity = BilibiliClient(http).resolve(URL + '?p=' + str(value))
+        assert identity.page == value
+    else:
+        http.view['data']['aid'] = value
+        identity = BilibiliClient(http).resolve('av' + str(value))
+        assert identity.aid == value

@@ -69,6 +69,28 @@ def _remaining(deadline: float) -> float:
     return remaining
 
 
+def _wait_for_retry(error: BilibiliHTTPError, attempt: int, *, deadline: float) -> None:
+    """Apply the shared attempt limit, Retry-After policy and stage budget."""
+    if error._retryable:
+        _remaining(deadline)
+    if not error._retryable or attempt == 2:
+        raise error from None
+    delay = float(attempt + 1)
+    if error._retry_after:
+        try:
+            retry_after = float(error._retry_after)
+        except ValueError:
+            try:
+                retry_after = (parsedate_to_datetime(error._retry_after) - datetime.now(timezone.utc)).total_seconds()
+            except (ValueError, TypeError, OverflowError):
+                retry_after = 0
+        if math.isfinite(retry_after):
+            delay = max(delay, retry_after)
+    if delay >= _remaining(deadline):
+        raise _error('deadline_exceeded') from None
+    time.sleep(delay)
+
+
 @contextmanager
 def _attempt_guard(deadline: float) -> Iterator[None]:
     """Interrupt the entire request, including urllib's blocking header read."""
@@ -197,24 +219,7 @@ class BilibiliHTTP:
                 error = exc
             except ValueError:
                 error = _error('invalid_response')
-            if error._retryable:
-                _remaining(self._deadline)
-            if not error._retryable or attempt == 2:
-                raise error from None
-            delay = float(attempt + 1)
-            if error._retry_after:
-                try:
-                    retry_after = float(error._retry_after)
-                except ValueError:
-                    try:
-                        retry_after = (parsedate_to_datetime(error._retry_after) - datetime.now(timezone.utc)).total_seconds()
-                    except (ValueError, TypeError, OverflowError):
-                        retry_after = 0
-                if math.isfinite(retry_after):
-                    delay = max(delay, retry_after)
-            if delay >= _remaining(self._deadline):
-                raise _error('deadline_exceeded') from None
-            time.sleep(delay)
+            _wait_for_retry(error, attempt, deadline=self._deadline)
         raise _error('network_error')
 
     def resolve_short_url(self, url: str) -> str:
@@ -270,22 +275,7 @@ class BilibiliHTTP:
                     error = exc
                 except ValueError:
                     error = _error('unsafe_target')
-                if not error._retryable or attempt == 2:
-                    raise error from None
-                delay = float(attempt + 1)
-                if error._retry_after:
-                    try:
-                        retry_after = float(error._retry_after)
-                    except ValueError:
-                        try:
-                            retry_after = (parsedate_to_datetime(error._retry_after) - datetime.now(timezone.utc)).total_seconds()
-                        except (ValueError, TypeError, OverflowError):
-                            retry_after = 0
-                    if math.isfinite(retry_after):
-                        delay = max(delay, retry_after)
-                if delay >= _remaining(self._deadline):
-                    raise _error('deadline_exceeded') from None
-                time.sleep(delay)
+                _wait_for_retry(error, attempt, deadline=self._deadline)
         raise _error('unsafe_target')
 
     def get_json(self, url: str, params: dict | None = None) -> dict:

@@ -31,9 +31,15 @@ def _page(url: str) -> int | None:
         raise BilibiliInputError('invalid_video_url', 'Invalid Bilibili video URL') from None
     if values is None:
         return None
-    if len(values) != 1 or not re.fullmatch(r'[0-9]+', values[0]) or int(values[0]) < 1:
-        raise BilibiliInputError('invalid_video_part', 'Invalid Bilibili part')
-    return int(values[0])
+    try:
+        if len(values) != 1 or not re.fullmatch(r'[0-9]+', values[0]):
+            raise ValueError
+        page = int(values[0])
+        if page < 1:
+            raise ValueError
+    except ValueError:
+        raise BilibiliInputError('invalid_video_part', 'Invalid Bilibili part') from None
+    return page
 
 
 def _site_url(url: str) -> str:
@@ -73,7 +79,10 @@ class BilibiliClient:
         if not match:
             raise BilibiliInputError('invalid_video_url', 'Invalid Bilibili video URL')
         token = match[1]
-        params = {'bvid': token} if token.startswith('BV') else {'aid': int(token[2:])}
+        try:
+            params = {'bvid': token} if token.startswith('BV') else {'aid': int(token[2:])}
+        except ValueError:
+            raise BilibiliInputError('invalid_video_url', 'Invalid Bilibili video URL') from None
         payload = self.http.get_json(_API + '/x/web-interface/view', params)
         if payload.get('code') in {-400, -404, 62002, 62004}:
             raise BilibiliInputError('invalid_video_url', 'Bilibili video does not exist')
@@ -82,7 +91,7 @@ class BilibiliClient:
         if (not isinstance(bvid, str) or not _BVID.fullmatch(bvid) or type(aid) is not int or aid <= 0
                 or not isinstance(pages, list) or not pages):
             raise _invalid_response()
-        if (token.startswith('BV') and bvid != token) or (token.startswith('av') and aid != int(token[2:])):
+        if (token.startswith('BV') and bvid != token) or (token.startswith('av') and aid != params['aid']):
             raise _invalid_response()
         if any(not isinstance(item, dict) or type(item.get('page')) is not int for item in pages):
             raise _invalid_response()

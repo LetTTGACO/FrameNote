@@ -535,3 +535,45 @@ def test_short_transport_guard_rejects_thread_and_general_download_stays_strict(
     with pytest.raises(BilibiliHTTPError) as error:
         client.download('https://b23.tv/demo', referer='https://www.bilibili.com/')
     assert error.value.code == 'unsafe_target' and transport.requests == []
+
+
+@pytest.mark.parametrize('short', [False, True], ids=['api', 'short'])
+@pytest.mark.parametrize(('retry_after', 'expected_delay'), [
+    ('4', 4.), ('Sun, 25 Oct 2026 00:00:04 GMT', 4.), ('invalid', 1.), ('NaN', 1.), ('inf', 1.),
+])
+def test_transports_preserve_same_retry_after_policy_and_request_caps(transport, monkeypatch, short, retry_after, expected_delay):
+    from datetime import datetime, timezone
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 25, tzinfo=timezone.utc)
+    monkeypatch.setattr('framenote.platform_http.datetime', FrozenDateTime)
+    target = 'https://www.bilibili.com/video/BV1xM4y1z7Kt'
+    transport.outcomes = [http_error(429, retry_after=retry_after), urllib.error.URLError('secret'),
+                          http_error(302, target) if short else Response(b'{}')]
+    client = BilibiliHTTP(BilibiliCredentials({'SESSDATA': 'secret'}), deadline=160)
+    result = client.resolve_short_url('https://b23.tv/demo') if short else client.get_json('https://api.bilibili.com/x')
+    assert result == (target if short else {})
+    assert transport.sleeps == [expected_delay, 2.]
+    assert transport.timeouts == [15 if short else 20] * 3
+    if short:
+        assert all(request.get_header('Cookie') is None for request in transport.requests)
+
+
+@pytest.mark.parametrize('short', [False, True], ids=['api', 'short'])
+def test_transports_classify_stage_expiry_during_final_network_failure(transport, short):
+    original_open = transport.open
+    def slow_failure(request, timeout):
+        transport.now += 8
+        return original_open(request, timeout)
+    transport.open = slow_failure
+    transport.outcomes = [urllib.error.URLError('secret')] * 3
+    client = BilibiliHTTP(None, deadline=125)
+    with pytest.raises(BilibiliHTTPError) as error:
+        if short:
+            client.resolve_short_url('https://b23.tv/demo')
+        else:
+            client.get_json('https://api.bilibili.com/x')
+    assert error.value.code == 'deadline_exceeded'
+    assert len(transport.requests) == 3
+    assert transport.sleeps == [1., 2.]

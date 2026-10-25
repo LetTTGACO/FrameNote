@@ -556,3 +556,32 @@ def test_acquisition_cli_defaults_full_and_dispatches_subtitles_synchronously(tm
     monkeypatch.setattr(service_acquire, 'acquire_subtitles', lambda *args: calls.append(args))
     service_acquire.main()
     assert calls == [(tmp_path, '3' * 32, _BILI_URL)]
+
+
+@pytest.mark.parametrize(('url', 'code'), [
+    pytest.param(_BILI_URL + '?p=' + '9' * 5000, 'invalid_video_part', id='part'),
+    pytest.param('av' + '9' * 5000, 'invalid_video_url', id='av'),
+])
+def test_subtitle_worker_serializes_long_integer_input_error_without_network(tmp_path, monkeypatch, url, code):
+    import sys
+    from framenote import service_acquire
+    from framenote.subtitles import BilibiliInputError, SubtitleOutcome
+    if not hasattr(sys, 'set_int_max_str_digits'):
+        pytest.skip('This Python has no decimal integer conversion limit')
+    settings = service_acquire.Settings.from_env({})
+    monkeypatch.setattr(service_acquire.Settings, 'from_env', lambda: settings)
+    def unexpected_network(*args, **kwargs):
+        pytest.fail('Invalid numeric input must be rejected before network access')
+    monkeypatch.setattr(service_acquire.BilibiliHTTP, 'get_json', unexpected_network)
+    task_id = '4' * 32
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4300)
+    try:
+        service_acquire.acquire_subtitles(tmp_path, task_id, url)
+    finally:
+        sys.set_int_max_str_digits(previous)
+    payload = json.loads((tmp_path / task_id / 'subtitle-acquisition.json').read_text())
+    assert payload['error']['code'] == code
+    with pytest.raises(BilibiliInputError) as error:
+        SubtitleOutcome.from_payload(payload)
+    assert error.value.code == code
