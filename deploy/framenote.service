@@ -7,10 +7,10 @@ Wants=network-online.target
 Type=simple
 User=framenote
 Group=framenote
-WorkingDirectory=/opt/framenote
+WorkingDirectory=/opt/framenote/current
 EnvironmentFile=/etc/framenote/service.env
 Environment=FRAMENOTE_WORKSPACE=/var/lib/framenote
-ExecStart=/opt/framenote/.venv/bin/python -m uvicorn framenote.service:app --host 0.0.0.0 --port 18121 --workers 1 --no-proxy-headers
+ExecStart=/opt/framenote/current/.venv/bin/python -m uvicorn framenote.service:app --host 0.0.0.0 --port 18121 --workers 1 --no-proxy-headers
 StateDirectory=framenote
 Restart=on-failure
 RestartSec=5

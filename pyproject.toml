@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "framenote"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Headless video materials and chapter-note workflow for agents"
 requires-python = ">=3.10,<3.13"
 license = "MIT"
@@ -32,4 +32,7 @@ ignore_missing_imports = true
 follow_imports = "silent"
 
 [tool.setuptools.package-data]
-framenote = ["asr/models.lock.json"]
+framenote = ["asr/models.lock.json", "_build_info.json"]
+
+[tool.setuptools.dynamic]
+version = {attr = "framenote.__version__"}

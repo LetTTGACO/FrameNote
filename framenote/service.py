@@ -26,6 +26,8 @@ from .media_jobs import MediaJobs
 from .materials import is_material_name, material_names
 from .task_store import TaskStore, atomic_json, public_error
 from .transcript import MaterialError, TranscriptSegment, read_transcript, segments_to_prompt, segments_to_srt
+from . import __version__
+from .version import build_info
 
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".mpeg", ".mpg", ".ts"}
 
@@ -95,7 +97,8 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
             finally:
                 await asyncio.gather(jobs.stop(), media_jobs.stop())
 
-    app = FastAPI(title="FrameNote", lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
+    identity = build_info()
+    app = FastAPI(title="FrameNote", version=__version__, lifespan=lifespan, docs_url=None, redoc_url=None, openapi_url=None)
     remote_mcp = create_mcp(app=app)
     mcp_app = remote_mcp.streamable_http_app()
     app.state.store, app.state.jobs, app.state.backend = store, jobs, backend
@@ -112,7 +115,7 @@ def create_app(settings: Settings | None = None, pipeline: Pipeline | None = Non
     @app.get("/api/health")
     async def health():
         status = backend.health()
-        return {"status": "ok", "service": "FrameNote", "mode": "headless", "asr": status.backend,
+        return {"status": "ok", "service": "FrameNote", **identity, "mode": "headless", "asr": status.backend,
                 "asr_models_present": status.configured, "backend": asdict(status), "galaxy_enabled": config.galaxy_enabled}
 
     @app.get("/api/ready")

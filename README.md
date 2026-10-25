@@ -165,6 +165,7 @@ python3 -S skills/framenote/scripts/headless.py transcribe 'VIDEO_SOURCE' \
 | 获取材料、管理任务、截图和取回视频 | [使用指南](docs/USAGE.md) |
 | 设置服务环境变量和客户端配置 | [配置参考](docs/CONFIGURATION.md) |
 | 安装、升级、备份和排障 | [部署指南](docs/DEPLOYMENT.md) |
+| 查询版本、归档发布包和回滚 | [版本发布与回滚](docs/RELEASING.md)、[发布记录](CHANGELOG.md) |
 | 下载模型、核验哈希和查找许可来源 | [模型指南](docs/MODELS.md) |
 | 理解服务、客户端和 Agent 的分工 | [系统范围](docs/SCOPE.md) |
 | 接入其他 ASR 后端 | [ASR 契约与扩展指南](docs/ASR.md) |

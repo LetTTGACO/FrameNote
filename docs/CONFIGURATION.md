@@ -57,7 +57,7 @@ HTTP API 本身没有账号认证。限制服务为受信网络访问；公网�
 
    模型文件完整且 ASR Python 依赖预检通过时，返回 HTTP `200`，`configured` 和 `available` 均为 `true`；否则返回 `503`，`reason` 说明缺项。
 
-`/api/health` 返回进程活性、后端状态和 `galaxy_enabled`。其中 `asr_models_present` 表示必需模型文件存在，不表示哈希核验通过。
+`/api/health` 返回进程活性、后端状态、`galaxy_enabled`，以及 `version`、完整源码 `commit` 和构建的 `dirty` 标志。无法确定提交时相应身份字段为 `null`。`asr_models_present` 表示必需模型文件存在，不表示哈希核验通过。发布与回滚见[版本流程](RELEASING.md)。
 
 依赖预检在启动时执行并缓存。修复或安装 Python 依赖后，重启服务。健康请求复用缓存并检查模型文件是否存在；完整哈希核验使用[模型核验命令](MODELS.md#准备并核验模型)。
 

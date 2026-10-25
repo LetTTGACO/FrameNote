@@ -157,6 +157,19 @@ def test_no_ui_and_lan_access(tmp_path):
         assert client.get("/api/health").status_code == 200
 
 
+def test_health_reports_running_build_identity_without_changing_readiness(tmp_path, monkeypatch):
+    from framenote import __version__
+    identity = {"version": __version__, "commit": "a" * 40, "dirty": False}
+    monkeypatch.setattr("framenote.service.build_info", lambda: identity)
+    app = create_app(config(tmp_path))
+    assert app.version == __version__
+    with TestClient(app) as client:
+        health = client.get("/api/health").json()
+        assert {key: health[key] for key in identity} == identity
+        assert health["status"] == "ok"
+        assert client.get("/api/ready").status_code == 503
+
+
 def test_retained_video_download_is_discoverable_and_does_not_mutate_task(tmp_path, video):
     with client_for(config(tmp_path / "workspace")) as client:
         task_id = finished_task(client.app.state.store, video)

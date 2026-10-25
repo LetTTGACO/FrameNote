@@ -108,7 +108,7 @@ Ubuntu 按 [Deno 安装说明](https://docs.deno.com/runtime/getting_started/ins
    ```
 
    将 `WHEEL_PATH` 替换为 wheel 的绝对路径，保留 `[asr]`，例如以
-   `framenote-0.1.0-py3-none-any.whl` 结尾的文件路径。
+   `framenote-0.2.0-py3-none-any.whl` 结尾的文件路径。
 
 3. 检查依赖一致性：
 
@@ -183,13 +183,14 @@ Ubuntu 按 [Deno 安装说明](https://docs.deno.com/runtime/getting_started/ins
 
 ## 配置 systemd 服务
 
-本节在 Ubuntu 上使用以下布局。模板字段与配置文件须指向同一组路径：
+本节用于 Ubuntu 首次安装。已有运行实例先按[版本发布与回滚](RELEASING.md)准备备份和候选环境。模板字段与配置文件须指向同一组路径：
 
 | 用途 | 示例值 |
 | --- | --- |
 | 用户和组 | `framenote` |
-| 工作目录 | `/opt/framenote` |
-| 虚拟环境 | `/opt/framenote/.venv` |
+| 工作目录 | `/opt/framenote/current`，指向 `releases/v0.2.0` |
+| 虚拟环境 | `/opt/framenote/releases/v0.2.0/.venv` |
+| 发布包 | `/opt/framenote/artifacts/v0.2.0` |
 | 环境文件 | `/etc/framenote/service.env` |
 | workspace | `/var/lib/framenote` |
 
@@ -206,36 +207,39 @@ Ubuntu 按 [Deno 安装说明](https://docs.deno.com/runtime/getting_started/ins
 
    ```bash
    sudo install -d -o framenote -g framenote \
-     /opt/framenote /var/lib/framenote
+     /opt/framenote /opt/framenote/releases /opt/framenote/releases/v0.2.0 \
+     /opt/framenote/artifacts /opt/framenote/models /var/lib/framenote
    sudo install -d /etc/framenote
    ```
 
 3. 为服务用户创建虚拟环境：
 
    ```bash
-   sudo -u framenote python3.10 -m venv /opt/framenote/.venv
+   sudo -u framenote python3.10 -m venv /opt/framenote/releases/v0.2.0/.venv
    ```
 
 4. 安装 wheel：
 
    ```bash
-   sudo -u framenote /opt/framenote/.venv/bin/python -m pip install \
+   sudo -u framenote /opt/framenote/releases/v0.2.0/.venv/bin/python -m pip install \
      'WHEEL_PATH[asr]'
    ```
 
    将 `WHEEL_PATH` 替换为服务用户可读取的 wheel 绝对路径，保留 `[asr]`。
 
+   按[制作发布包](RELEASING.md#制作发布包)归档本次 wheel、源码包和实际依赖清单，核验提交与版本。
+
 5. 准备模型：
 
    ```bash
-   sudo -u framenote /opt/framenote/.venv/bin/python -m framenote.models \
+   sudo -u framenote /opt/framenote/releases/v0.2.0/.venv/bin/python -m framenote.models \
      prepare --out /opt/framenote/models
    ```
 
 6. 核验模型：
 
    ```bash
-   sudo -u framenote /opt/framenote/.venv/bin/python -m framenote.models \
+   sudo -u framenote /opt/framenote/releases/v0.2.0/.venv/bin/python -m framenote.models \
      verify --out /opt/framenote/models
    ```
 
@@ -253,6 +257,14 @@ Ubuntu 按 [Deno 安装说明](https://docs.deno.com/runtime/getting_started/ins
    ```
 
    确认服务用户可读取模型和配置、可写 workspace。`EnvironmentFile` 的同名值覆盖 unit 中的 `Environment`，因此环境文件中的 workspace 必须与预期一致。
+
+   首次安装时建立版本指针：
+
+   ```bash
+   sudo -u framenote ln -s releases/v0.2.0 /opt/framenote/current
+   ```
+
+   已有 `current` 或旧版服务时，使用[升级切换](RELEASING.md#升级切换)流程，保留原环境。
 
 9. 从源码或源码归档根目录安装 unit：
 
@@ -321,40 +333,13 @@ HTTP API 供受信访问；监听局域网时用防火墙限制调用者，公�
 4. 在客户端备份笔记根目录，包括两份阅读稿和 `materials/`。
 5. 在独立目录检查备份副本，核对转录与截图的 SHA-256、任务状态和笔记中的本地引用。
 
-workspace 备份应包含已有源视频、独立音轨、`task.json`、转录、原始字幕、ASR 原件、候选尝试、`operations/`、媒体索引、截图和已落盘临时材料。字幕任务可以没有媒体。私有凭据单独按受限权限备份，不混入任务材料。systemd 示例中的备份目标为 `/var/lib/framenote`、`/etc/framenote`、`/opt/framenote/.venv` 及对应 unit。模型可按锁文件重新下载，也可归档后用 `models verify` 核验。
+workspace 备份应包含已有源视频、独立音轨、`task.json`、转录、原始字幕、ASR 原件、候选尝试、`operations/`、媒体索引、截图和已落盘临时材料。字幕任务可以没有媒体。私有凭据单独按受限权限备份，不混入任务材料。systemd 示例中的备份目标为 `/var/lib/framenote`、`/etc/framenote`、`current` 实际指向的版本目录、对应发布包及 unit；记录符号链接目标，备份实际目录。模型可按锁文件重新下载，也可归档后用 `models verify` 核验。
 
 虚拟环境脚本包含绝对路径；恢复环境归档时使用原机器的原路径。保留原目录，使用副本验证恢复过程。
 
 ## 升级服务
 
-完成备份并准备目标 wheel 后，按以下步骤升级：
-
-1. 在独立虚拟环境、workspace 和端口中安装候选版本。
-2. 对候选版本完成依赖检查、模型核验、就绪检查和短视频转录及截图验证。
-3. 停止正式服务。
-4. 使用正式虚拟环境安装已验证的 wheel：
-
-   ```bash
-   /opt/framenote/.venv/bin/python -m pip install --upgrade 'WHEEL_PATH[asr]'
-   ```
-
-   将 `WHEEL_PATH` 替换为候选验证通过的 wheel 绝对路径，保留 `[asr]`。
-
-5. 检查正式环境依赖：
-
-   ```bash
-   /opt/framenote/.venv/bin/python -m pip check
-   ```
-
-6. 核验正式环境模型：
-
-   ```bash
-   /opt/framenote/.venv/bin/python -m framenote.models verify \
-     --out /opt/framenote/models
-   ```
-
-7. 启动正式服务。
-8. 用旧任务 ID 回读转录和截图，并提交一个新任务，确认旧材料可读且新任务完成。
+为新版本创建独立目录和虚拟环境，安装已归档 wheel，在独立 workspace / 端口完成候选验收。随后停服备份，切换 `current`，核对匹配配置 / 模型后启动，检查版本、就绪状态、旧材料和新任务。具体命令与首次迁移旧布局的恢复方式见[升级切换](RELEASING.md#升级切换)。旧环境保留原路径，不原地升级。
 
 服务升级后，同步更新已安装的 `skills/framenote/` 完整目录（Skill 与 `scripts/headless.py` 一起更新），保留客户端 JSON 配置和现有笔记。新客户端可读取 v1/v2/v3 材料并恢复后台媒体等待；`--force-asr` 产生新任务时必须使用新的笔记目录，目录身份保护会拒绝覆盖旧字幕笔记。
 
@@ -362,17 +347,7 @@ workspace 备份应包含已有源视频、独立音轨、`task.json`、转录�
 
 ## 恢复旧版本
 
-使用升级前的备份完成以下步骤：
-
-1. 停止服务。
-2. 将虚拟环境备份恢复到原绝对路径，或使用保存的旧 wheel 和依赖版本重建环境。
-3. 恢复原配置和 unit。
-4. 执行 `python -m pip check`，确认依赖一致。
-5. 执行 `python -m framenote.models verify --out models`，将 `models` 改为实际模型目录，确认核验通过。
-6. 重新加载 systemd 配置并启动服务。
-7. 检查就绪状态，回读旧任务转录与截图，确认本地笔记引用有效。
-
-保留失败环境和日志，供后续定位原因。
+停服并保留当前数据及失败日志，核验旧发布包与环境后，先检查目标版本的数据兼容性，再切回旧目录和匹配配置。包含旧版不支持的 v3 材料时，用升级前备份创建恢复 workspace，保留升级后原目录；不能只切代码就假定任务兼容。完整步骤见[回滚与数据兼容](RELEASING.md#回滚与数据兼容)。
 
 ## 排障
 
