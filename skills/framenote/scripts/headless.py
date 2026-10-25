@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+from datetime import date as calendar_date
 from email.message import Message
 import hashlib
 import http.client
@@ -20,7 +21,7 @@ import uuid
 
 ARTIFACTS = {"metadata.json", "transcript.json", "transcript.md", "transcript.srt", "asr.raw.json", "frames.json",
              "subtitle.raw.json", "subtitle_attempts.json"}
-CONFIG_KEYS = {"service_url", "notes_dir", "download_video"}
+CONFIG_KEYS = {"service_url", "notes_dir", "vault_dir", "download_video"}
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".mpeg", ".mpg", ".ts", ".m4s"}
 
 
@@ -65,14 +66,15 @@ def read_config(path: Path) -> dict:
     unknown = value.keys() - CONFIG_KEYS
     if unknown:
         raise ValueError(f"未知配置项：{', '.join(sorted(unknown))}（{path}）")
-    for key in ("service_url", "notes_dir"):
+    for key in ("service_url", "notes_dir", "vault_dir"):
         if key in value and (not isinstance(value[key], str) or not value[key].strip()):
             raise ValueError(f"{key} 必须是非空字符串（{path}）")
     if "download_video" in value and type(value["download_video"]) is not bool:
         raise ValueError(f"download_video 必须是 true 或 false（{path}）")
-    if "notes_dir" in value:
-        directory = Path(value["notes_dir"]).expanduser()
-        value["notes_dir"] = str((directory if directory.is_absolute() else path.parent / directory).resolve())
+    for key in ("notes_dir", "vault_dir"):
+        if key in value:
+            directory = Path(value[key]).expanduser()
+            value[key] = str((directory if directory.is_absolute() else path.parent / directory).resolve())
     return value
 
 
@@ -110,8 +112,8 @@ def resolve_config(*, cwd: Path | None = None, user_path: Path | None = None,
     directory = (cwd or Path.cwd()).resolve()
     user = user_path if user_path is not None else user_config_path()
     project = project_config_path(directory)
-    result = {"service_url": "http://127.0.0.1:18121", "notes_dir": str(default_notes_dir(directory)),
-              "download_video": False}
+    result: dict = {"service_url": "http://127.0.0.1:18121", "notes_dir": str(default_notes_dir(directory)),
+              "vault_dir": str(Path.home() / "workspace/PersonalOS"), "download_video": False}
     sources = {key: "default" for key in result}
     for path in (user, project):
         if path is not None:
@@ -120,6 +122,7 @@ def resolve_config(*, cwd: Path | None = None, user_path: Path | None = None,
             sources.update({key: str(path) for key in values})
     environment = os.environ if environ is None else environ
     for key, variable in (("service_url", "FRAMENOTE_SERVICE_URL"), ("notes_dir", "FRAMENOTE_NOTES_DIR"),
+                          ("vault_dir", "FRAMENOTE_VAULT_DIR"),
                           ("download_video", "FRAMENOTE_DOWNLOAD_VIDEO")):
         if variable in environment:
             result[key] = boolean(environment[variable]) if key == "download_video" else environment[variable]
@@ -129,10 +132,11 @@ def resolve_config(*, cwd: Path | None = None, user_path: Path | None = None,
             result[key] = value
             sources[key] = "command line"
     result["service_url"] = service_url(result["service_url"])
-    if not isinstance(result["notes_dir"], (str, Path)) or not str(result["notes_dir"]).strip():
-        raise ValueError("notes_dir 必须是非空路径")
-    notes = Path(result["notes_dir"]).expanduser()
-    result["notes_dir"] = str((notes if notes.is_absolute() else directory / notes).resolve())
+    for key in ("notes_dir", "vault_dir"):
+        if not isinstance(result[key], (str, Path)) or not str(result[key]).strip():
+            raise ValueError(f"{key} 必须是非空路径")
+        path = Path(result[key]).expanduser()
+        result[key] = str((path if path.is_absolute() else directory / path).resolve())
     result.update(project_config=str(project) if project else None,
                   user_config=str(user) if user.exists() else None, sources=sources)
     return result
@@ -153,6 +157,328 @@ def digest(path: Path) -> str:
         while chunk := stream.read(1024**2):
             value.update(chunk)
     return value.hexdigest()
+
+
+def split_frontmatter(text: str) -> tuple[dict[str, str], str]:
+    """Read scalar fields used by this client; leave body text and YAML lists alone."""
+    match = re.match(r"\A---\r?\n(.*?)\r?\n---(?:\r?\n|$)", text, re.S)
+    if not match:
+        return {}, text
+    fields = {}
+    for key, raw in re.findall(r"^([a-z_]+):[ \t]*(.*)$", match[1], re.M):
+        raw = raw.strip()
+        if raw.startswith('"'):
+            value, _ = json.JSONDecoder().raw_decode(raw)
+            if not isinstance(value, str):
+                continue
+        elif raw.startswith("'") and raw.endswith("'"):
+            value = raw[1:-1].replace("''", "'")
+        else:
+            value = raw.split(" #", 1)[0].strip()
+        fields[key] = value
+    return fields, text[match.end():]
+
+
+def note_context(note: Path) -> dict:
+    """Resolve new vault metadata or the previous relative bundle entry."""
+    note = note.expanduser().resolve()
+    fields, _ = split_frontmatter(note.read_text(encoding="utf-8"))
+    if fields.get("framenote_task_id") and fields.get("framenote_service_url"):
+        task_id, base = fields["framenote_task_id"], fields["framenote_service_url"]
+    else:
+        marker = note.parent / fields.get("bundle", "materials/bundle.json")
+        bundle = json.loads(marker.read_text(encoding="utf-8"))
+        check_version(bundle)
+        task_id, base = bundle["task_id"], bundle["service_url"]
+        fields.setdefault("source_url", bundle.get("task", {}).get("video_url", ""))
+    if not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+        raise ValueError("笔记中的 FrameNote 任务 ID 无效")
+    return {"note_path": str(note), "task_id": task_id, "service_url": service_url(base),
+            "source_url": fields.get("source_url", "")}
+
+
+def source_identity(source: str) -> str:
+    """Match known platform identities without changing Bilibili part selection."""
+    parsed = urllib.parse.urlsplit(source)
+    if parsed.scheme not in {"http", "https"}:
+        return str(Path(source).expanduser().resolve())
+    host = (parsed.hostname or "").lower()
+    query = urllib.parse.parse_qs(parsed.query)
+    if host in {"youtube.com", "www.youtube.com", "m.youtube.com", "youtu.be"}:
+        video = (parsed.path.strip("/") if host == "youtu.be" else
+                 query.get("v", [""])[0] if parsed.path == "/watch" else
+                 parsed.path.split("/")[2] if parsed.path.startswith(("/shorts/", "/embed/", "/live/")) else "")
+        if video:
+            return "youtube:" + video
+    if host in {"bilibili.com", "www.bilibili.com", "m.bilibili.com"}:
+        match = re.search(r"/video/((?:BV|av)[A-Za-z0-9]+)", parsed.path)
+        if match:
+            return f"bilibili:{match[1]}:p={query.get('p', ['1'])[0]}"
+    if host in {"douyin.com", "www.douyin.com", "m.douyin.com"}:
+        match = re.search(r"/video/([0-9]+)", parsed.path)
+        if match:
+            return "douyin:" + match[1]
+    pairs = [(key, value) for key, value in urllib.parse.parse_qsl(parsed.query)
+             if not key.startswith("utm_") and key not in {"spm_id_from", "share_source", "vd_source"}]
+    return urllib.parse.urlunsplit((parsed.scheme, parsed.netloc.lower(), parsed.path.rstrip("/"),
+                                   urllib.parse.urlencode(sorted(pairs)), ""))
+
+
+def vault_path(vault: Path, relative: str) -> Path:
+    path = vault / relative
+    if not path.resolve().is_relative_to(vault) or any(p.is_symlink() for p in (path, *path.parents) if p != vault):
+        raise ValueError(f"知识库目标路径包含越界路径或符号链接：{relative}")
+    return path
+
+
+def find_notes(vault: Path, *, source_url: str = "", task_id: str = "", base: str = "") -> list[dict]:
+    vault = vault.expanduser().resolve()
+    if not vault.is_dir():
+        raise ValueError(f"知识库目录不存在，请配置 vault_dir：{vault}")
+    notes = vault_path(vault, "03_Bookmarks/Videos")
+    found = []
+    for note in sorted(notes.glob("*.md")):
+        if note.is_symlink():
+            continue
+        fields, _ = split_frontmatter(note.read_text(encoding="utf-8"))
+        same_source = bool(source_url and fields.get("source_url")
+                           and source_identity(source_url) == source_identity(fields["source_url"]))
+        same_task = bool(task_id and base and fields.get("framenote_task_id") == task_id
+                         and fields.get("framenote_service_url", "").rstrip("/") == base.rstrip("/"))
+        if same_source or same_task:
+            found.append(note_context(note))
+    return found
+
+
+def export_note(output: Path, vault: Path, *, title: str, date: str, author: str,
+                tags: list[str]) -> dict:
+    """Export authored reading documents and selected frames, never replace vault edits."""
+    output, vault = output.expanduser().resolve(), vault.expanduser().resolve()
+    if not vault.is_dir():
+        raise ValueError(f"知识库目录不存在，请配置 vault_dir：{vault}")
+    if output.is_relative_to(vault):
+        raise ValueError("材料工作区须位于知识库之外")
+    calendar_date.fromisoformat(date)
+    bundle = json.loads((output / "materials/bundle.json").read_text(encoding="utf-8"))
+    check_version(bundle)
+    task_id = bundle.get("task_id")
+    if not isinstance(task_id, str) or not re.fullmatch(r"[A-Za-z0-9_-]+", task_id):
+        raise ValueError("材料任务 ID 无效")
+    base = service_url(bundle["service_url"])
+    draft = output / "notes.md"
+    fields, body = split_frontmatter(draft.read_text(encoding="utf-8"))
+    source = fields.get("source_url") or bundle.get("task", {}).get("video_url")
+    if not isinstance(source, str) or not source.strip():
+        raise ValueError("请在 notes.md 的 source_url 中记录原视频来源")
+    matches = find_notes(vault, source_url=source, task_id=task_id, base=base)
+    if len(matches) > 1:
+        raise ValueError("找到多份同视频笔记，请先核对：" + ", ".join(item["note_path"] for item in matches))
+    if matches:
+        old_note = Path(matches[0]["note_path"])
+        old_raw = vault_path(vault, f"08_Attachments/Files/FrameNote/{old_note.stem}-原稿.md")
+        return {**matches[0], "existing": True,
+                "transcript_path": str(old_raw) if old_raw.is_file() else None,
+                "message": "已有知识库笔记已保留，请直接在原笔记中继续讨论和维护原稿。"}
+    if not bundle.get("download_complete") or bundle.get("task", {}).get("status") != "completed":
+        raise ValueError("任务与材料须完成后再导出")
+    created = fields.get("date") or fields.get("created") or date
+    calendar_date.fromisoformat(created)
+    name = re.sub(r'[\x00-\x1f/\\:*?"<>|#\[\]]+', " ", title).strip(" .")[:60].rstrip()
+    if not name or not author.strip():
+        raise ValueError("标题和整理者必须非空")
+    stem = f"{created}-{name}"
+    note_relative = f"03_Bookmarks/Videos/{stem}.md"
+    raw_relative = f"08_Attachments/Files/FrameNote/{stem}-原稿.md"
+    images_relative = f"08_Attachments/Images/videos/{stem}"
+    # A readable name collision gets a stable task suffix, without renaming old notes.
+    if any(vault_path(vault, rel).exists() for rel in (note_relative, raw_relative, images_relative)):
+        stem += "-" + hashlib.sha256((base + ":" + task_id).encode()).hexdigest()[:8]
+        note_relative = f"03_Bookmarks/Videos/{stem}.md"
+        raw_relative = f"08_Attachments/Files/FrameNote/{stem}-原稿.md"
+        images_relative = f"08_Attachments/Images/videos/{stem}"
+    for relative in (note_relative, raw_relative, images_relative):
+        if vault_path(vault, relative).exists():
+            raise ValueError(f"目标已存在，请保留并核对：{relative}")
+    raw_path = output / "chapters-transcript.md"
+    _, raw_body = split_frontmatter(raw_path.read_text(encoding="utf-8"))
+    corrections_path = output / "materials/corrections.md"
+    corrections = corrections_path.read_text(encoding="utf-8") if corrections_path.exists() else ""
+    if corrections:
+        # Corrections become one section of the original transcript, retaining their wording.
+        corrections = re.sub(r"^# .*(?:\n|$)", "", corrections, count=1)
+        corrections = re.sub(r"^(#{2,5}) ", r"#\1 ", corrections, flags=re.M)
+    body = re.sub(r"^# [^\n]+", lambda _: "# " + title, body, count=1, flags=re.M)
+    raw_body = re.sub(r"^# [^\n]+", lambda _: "# " + title + "：分章原稿", raw_body, count=1, flags=re.M)
+    documents = {"notes.md": body, "chapters-transcript.md": raw_body,
+                 "materials/corrections.md": corrections}
+    anchors = {}
+    for filename, text in documents.items():
+        anchors[filename] = dict(re.findall(r'<a\s+id=[\'"]([^\'"]+)[\'"]\s*></a>\s*\n#+\s+([^\n]+)', text))
+    index_path = output / "materials/frames.json"
+    frames = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else []
+    frame_index = {item["relative_path"]: item for item in frames}
+    selected: dict[str, tuple[Path, str]] = {}
+    used_names: set[str] = set()
+
+    def convert_link(match: re.Match, filename: str) -> str:
+        image, label, target = match.group(1), match.group(2), match.group(3).strip()
+        target = re.sub(r'''\s+(?:"[^"]*"|'[^']*'|\([^)]*\))\s*$''', "", target)
+        if target.startswith("<") and target.endswith(">"):
+            target = target[1:-1]
+        parsed = urllib.parse.urlsplit(target)
+        if parsed.scheme in {"http", "https", "mailto"}:
+            return match[0]
+        if parsed.scheme:
+            raise ValueError(f"请将本地材料链接替换为原稿或知识库链接：{target}")
+        local = (output / filename).parent / urllib.parse.unquote(parsed.path) if parsed.path else output / filename
+        local = local.resolve()
+        if not local.is_relative_to(output):
+            raise ValueError(f"阅读文档引用了工作区外的文件：{target}")
+        relative = local.relative_to(output).as_posix()
+        heading = urllib.parse.unquote(parsed.fragment)
+        if relative in frame_index:
+            if not re.fullmatch(r"materials/frames/[0-9a-f]{32}\.jpg", relative):
+                raise ValueError(f"截图索引路径无效：{relative}")
+            if not local.is_file():
+                raise ValueError(f"截图不存在：{target}")
+            if relative not in selected:
+                seconds = float(frame_index[relative]["actual_time"])
+                if not math.isfinite(seconds) or seconds < 0:
+                    raise ValueError("截图实际时间无效")
+                stamp = f"{int(seconds) // 60:02d}m{int(seconds) % 60:02d}s"
+                candidate, number = stamp + ".jpg", 1
+                while candidate in used_names:
+                    number += 1
+                    candidate = f"{stamp}-{number}.jpg"
+                used_names.add(candidate)
+                selected[relative] = (local, f"{images_relative}/{candidate}")
+            destination = selected[relative][1]
+        elif relative in {"notes.md", "chapters-transcript.md", "materials/corrections.md", "materials/transcript.md"}:
+            key = "chapters-transcript.md" if relative == "materials/transcript.md" else relative
+            heading = anchors.get(key, {}).get(heading, heading)
+            destination = (note_relative if relative == "notes.md" else raw_relative)[:-3]
+            if relative == "materials/corrections.md" and not heading:
+                heading = "识别纠错与疑点"
+            if relative == filename and heading:
+                destination = ""
+        else:
+            raise ValueError(f"请移除原始材料链接，改用来源说明和任务入口回查：{target}")
+        if any(char in heading for char in "|[]"):
+            raise ValueError(f"章节标题需调整为可用于 Wikilink 的文字：{heading}")
+        destination += "#" + heading if heading else ""
+        return f"![[{destination}]]" if image else f"[[{destination}|{label}]]"
+
+    def convert(text: str, filename: str) -> str:
+        parts = re.split(r"(```.*?```|~~~.*?~~~|`[^`\n]*`)", text, flags=re.S)
+        definitions = {}
+        definition = r"^[ \t]{0,3}\[([^\]\n]+)\]:[ \t]*(.+)$"
+        for part in parts[::2]:
+            for key, destination in re.findall(definition, part, re.M):
+                definitions[" ".join(key.split()).casefold()] = destination.strip()
+
+        def expand_reference(match: re.Match) -> str:
+            image, label, reference = match.groups()
+            if match.string[match.end():].startswith("("):
+                return match[0]
+            key = " ".join((reference or label).split()).casefold()
+            if key not in definitions:
+                return match[0]
+            return f"{image}[{label}]({definitions[key]})"
+
+        def escape_alias(match: re.Match[str]) -> str:
+            return "[[" + re.sub(r"(?<!\\)\|", r"\\|", match[1]) + "]]"
+
+        for index in range(0, len(parts), 2):
+            prose = re.sub(definition, "", parts[index], flags=re.M)
+            prose = re.sub(r"(!?)(?<!\[)\[([^\[\]\n]+)\](?:\[([^\]\n]*)\])?", expand_reference, prose)
+            parts[index] = re.sub(r"(!?)\[([^\]\n]*)\]\((<[^>\n]+>(?:[ \t]+[^)\n]*)?|[^)\n]+)\)",
+                                  lambda match: convert_link(match, filename), prose)
+        lines = "".join(parts).splitlines(keepends=True)
+        table_rows: set[int] = set()
+        fence = False
+        for index, line in enumerate(lines):
+            if line.lstrip().startswith(("```", "~~~")):
+                fence = not fence
+            if not fence and re.fullmatch(r"\s*\|?\s*:?-{3,}:?\s*(?:\|\s*:?-{3,}:?\s*)+\|?\s*", line):
+                table_rows.add(index - 1)
+                row = index + 1
+                while row < len(lines) and "|" in lines[row] and lines[row].strip():
+                    table_rows.add(row)
+                    row += 1
+        for row in table_rows:
+            segments = re.split(r"(`[^`\n]*`)", lines[row])
+            for index in range(0, len(segments), 2):
+                segments[index] = re.sub(r"\[\[([^\]\n]+)\]\]",
+                                         escape_alias, segments[index])
+            lines[row] = "".join(segments)
+        return "".join(lines)
+
+    body = convert(body, "notes.md")
+    raw_body = convert(raw_body, "chapters-transcript.md")
+    corrections = convert(corrections, "materials/corrections.md")
+    if corrections:
+        raw_body = raw_body.rstrip() + "\n\n## 识别纠错与疑点\n\n" + corrections.strip() + "\n"
+    planned = {note_relative[:-3]: body, raw_relative[:-3]: raw_body}
+    copied = {rel for _, rel in selected.values()}
+    for current, text in planned.items():
+        # Only prose is link-bearing; quoted commands and examples stay verbatim.
+        prose = "".join(re.split(r"(```.*?```|~~~.*?~~~|`[^`\n]*`)", text, flags=re.S)[::2])
+        for target in re.findall(r"\[\[([^\]\n]+)\]\]", prose):
+            path, _, heading = target.replace(r"\|", "|").split("|", 1)[0].partition("#")
+            if path in copied:
+                continue
+            linked = path.removesuffix(".md") if path else current
+            if linked in planned:
+                linked_body = planned[linked]
+            else:
+                candidate = vault_path(vault, linked)
+                if not candidate.is_file():
+                    candidate = vault_path(vault, linked + ".md")
+                if not candidate.is_file():
+                    raise ValueError(f"知识库链接目标不存在：{target}")
+                linked_body = candidate.read_text(encoding="utf-8") if heading else ""
+            if heading and heading not in re.findall(r"^#{1,6} (.+?)\s*#*\s*$", linked_body, re.M):
+                raise ValueError(f"知识库章节链接不存在：{target}")
+    metadata = {"title": title, "date": created, "updated": date, "source": author, "type": "summary",
+                "status": "active", "tags": tags, "source_url": source,
+                "framenote_task_id": task_id, "framenote_service_url": base}
+
+    def document(text: str, properties: dict) -> str:
+        header = "\n".join(f"{key}: {json.dumps(value, ensure_ascii=False)}" for key, value in properties.items())
+        return "---\n" + header + "\n---\n\n" + text.lstrip()
+
+    note_text = document(body, metadata)
+    raw_text = document(raw_body, {**metadata, "title": title + "：分章原稿", "type": "note"})
+    pending = [(vault_path(vault, rel), path.read_bytes()) for path, rel in selected.values()]
+    pending.extend([(vault_path(vault, raw_relative), raw_text.encode()),
+                    (vault_path(vault, note_relative), note_text.encode())])
+    written: list[Path] = []
+    created_directories: list[Path] = []
+    try:
+        for path, data in pending:
+            missing = []
+            directory = path.parent
+            while not directory.exists():
+                missing.append(directory)
+                directory = directory.parent
+            for directory in reversed(missing):
+                directory.mkdir()
+                created_directories.append(directory)
+            with path.open("xb") as stream:
+                written.append(path)
+                stream.write(data)
+    except OSError:
+        # Roll back only files created by this invocation; existing notes remain untouched.
+        for path in reversed(written):
+            path.unlink(missing_ok=True)
+        for directory in reversed(created_directories):
+            try:
+                directory.rmdir()
+            except OSError:
+                pass  # Another writer may now own files here; only remove empty directories.
+        raise
+    return {**note_context(vault / note_relative), "transcript_path": str(vault / raw_relative),
+            "images": [rel for _, rel in selected.values()], "existing": False}
 
 
 class Client:
@@ -236,7 +562,7 @@ class Client:
         try:
             response = self.opener.open(request, timeout=120)
         except urllib.error.HTTPError as error:
-            if error.code == 304 and headers:
+            if error.code == 304 and headers and previous is not None:
                 error.close()
                 return previous
             raise
@@ -372,6 +698,7 @@ def main() -> None:
     common = argparse.ArgumentParser(add_help=False)
     common.add_argument("--service-url", default=argparse.SUPPRESS)
     common.add_argument("--notes-dir", default=argparse.SUPPRESS)
+    common.add_argument("--vault-dir", default=argparse.SUPPRESS)
     common.add_argument("--download-video", action=argparse.BooleanOptionalAction, default=argparse.SUPPRESS,
                         help="取回服务端保留的视频；--no-download-video 覆盖自动取回配置")
     parser = argparse.ArgumentParser(description=__doc__, parents=[common])
@@ -417,12 +744,29 @@ def main() -> None:
     command("notes-dir", help="显示默认笔记父目录")
     command("config", help="显示生效配置及其来源")
     command("health", help="检查服务连接与后端状态")
+    export = command("export", help="将阅读稿、分章原稿与精选截图保存到 PersonalOS")
+    export.add_argument("--out-dir", type=Path, required=True, help="含 notes.md 和 materials/ 的工作区")
+    export.add_argument("--title", required=True)
+    export.add_argument("--date", required=True, help="用户时区的 YYYY-MM-DD 日期")
+    export.add_argument("--author", default="codex")
+    export.add_argument("--tags", nargs="*", default=[])
+    lookup = command("find-note", help="按原视频来源查找知识库中已有笔记")
+    lookup.add_argument("source_url")
+    context = command("note-context", help="从知识库笔记或旧版 bundle 入口读取任务身份")
+    context.add_argument("note", type=Path)
     args = parser.parse_args()
     config = resolve_config(**{key: getattr(args, key, None) for key in CONFIG_KEYS})
     if args.command == "config":
         result = config
     elif args.command == "notes-dir":
-        result = {"notes_directory": config["notes_dir"]}
+        result = {"notes_directory": config["notes_dir"], "vault_directory": config["vault_dir"]}
+    elif args.command == "find-note":
+        result = {"notes": find_notes(Path(config["vault_dir"]), source_url=args.source_url)}
+    elif args.command == "note-context":
+        result = note_context(args.note)
+    elif args.command == "export":
+        result = export_note(args.out_dir, Path(config["vault_dir"]), title=args.title,
+                             date=args.date, author=args.author, tags=args.tags)
     else:
         client = Client(config["service_url"])
         if hasattr(args, "out_dir"):

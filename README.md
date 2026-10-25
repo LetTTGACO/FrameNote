@@ -119,6 +119,7 @@ FrameNote 可以将 B站、抖音、YouTube 或本地视频整理成可阅读、
    ```json
    {
      "service_url": "http://127.0.0.1:18121",
+     "vault_dir": "~/workspace/PersonalOS",
      "download_video": false
    }
    ```
@@ -131,13 +132,13 @@ FrameNote 可以将 B站、抖音、YouTube 或本地视频整理成可阅读、
    python3 -S skills/framenote/scripts/headless.py config
    ```
 
-   确认输出中的 `service_url` 和 `notes_dir` 指向预期位置。
+   确认 `service_url` 指向服务，`notes_dir` 指向材料工作区父目录，`vault_dir` 指向已存在的 PersonalOS 知识库。
 
 其他项目可把整个 `skills/framenote/` 复制到该项目的 `.agents/skills/framenote/`；用户级安装位置为 `~/.agents/skills/framenote/`。脚本按执行目录查找项目配置，Skill 安装位置不影响配置查找。
 
 ## 整理第一个视频
 
-在已加载 Skill 的 Codex 对话中发送视频链接或本地视频路径。Agent 获取转录、组织章节、查看截图，然后生成 `notes.md` 和 `chapters-transcript.md`。
+在已加载 Skill 的 Codex 对话中发送视频链接或本地视频路径。Agent 先查找知识库中已有笔记，再获取转录、组织议题、查看截图并撰写主笔记和完整分章原稿。主笔记保留速览、引用资料、议题、后续讨论和证据回查，导出到 `03_Bookmarks/Videos/`；原稿与精选截图进入 `08_Attachments/`，使用 PersonalOS frontmatter 与 Wikilink。已有笔记中的讨论继续维护在原入口。
 
 要先用命令行检查材料获取，在仓库根目录运行：
 
@@ -147,6 +148,8 @@ python3 -S skills/framenote/scripts/headless.py transcribe 'VIDEO_SOURCE' \
 ```
 
 将 `VIDEO_SOURCE` 替换为视频链接或本地视频路径。成功后，材料保存在 `my-note/materials/`；阅读文档由 Agent 根据这些材料撰写。检查 `materials/bundle.json` 中的任务状态是否为 `completed`、`download_complete` 是否为 `true`。
+
+两份草稿完成后，使用 [`export`](docs/USAGE.md#导出到-personalos) 将持久内容写入知识库；材料工作区留在库外。客户端会转换链接并复制引用的截图，遇到已有视频笔记时返回原入口，保留其内容。
 
 字幕任务的 `completed` 表示文字材料已完成，此时服务端可以没有视频、音频或 ASR 原件。截图请求会后台准备视频；取回有声视频时再补齐需要的音轨。媒体操作失败或取消不会撤销已完成的转录。需要重新识别时使用 `transcribe --force-asr` 创建新任务，并为新任务选择新的笔记目录。
 

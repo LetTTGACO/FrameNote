@@ -1,4 +1,5 @@
 {
   "service_url": "http://127.0.0.1:18121",
+  "vault_dir": "~/workspace/PersonalOS",
   "download_video": false
 }
