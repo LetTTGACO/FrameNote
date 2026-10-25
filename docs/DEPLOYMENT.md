@@ -108,7 +108,7 @@ Ubuntu 按 [Deno 安装说明](https://docs.deno.com/runtime/getting_started/ins
    ```
 
    将 `WHEEL_PATH` 替换为 wheel 的绝对路径，保留 `[asr]`，例如以
-   `framenote-0.2.0-py3-none-any.whl` 结尾的文件路径。
+   `framenote-0.2.1-py3-none-any.whl` 结尾的文件路径。
 
 3. 检查依赖一致性：
 
@@ -188,9 +188,9 @@ Ubuntu 按 [Deno 安装说明](https://docs.deno.com/runtime/getting_started/ins
 | 用途 | 示例值 |
 | --- | --- |
 | 用户和组 | `framenote` |
-| 工作目录 | `/opt/framenote/current`，指向 `releases/v0.2.0` |
-| 虚拟环境 | `/opt/framenote/releases/v0.2.0/.venv` |
-| 发布包 | `/opt/framenote/artifacts/v0.2.0` |
+| 工作目录 | `/opt/framenote/current`，指向 `releases/v0.2.1` |
+| 虚拟环境 | `/opt/framenote/releases/v0.2.1/.venv` |
+| 发布包 | `/opt/framenote/artifacts/v0.2.1` |
 | 环境文件 | `/etc/framenote/service.env` |
 | workspace | `/var/lib/framenote` |
 
@@ -207,7 +207,7 @@ Ubuntu 按 [Deno 安装说明](https://docs.deno.com/runtime/getting_started/ins
 
    ```bash
    sudo install -d -o framenote -g framenote \
-     /opt/framenote /opt/framenote/releases /opt/framenote/releases/v0.2.0 \
+     /opt/framenote /opt/framenote/releases /opt/framenote/releases/v0.2.1 \
      /opt/framenote/artifacts /opt/framenote/models /var/lib/framenote
    sudo install -d /etc/framenote
    ```
@@ -215,13 +215,13 @@ Ubuntu 按 [Deno 安装说明](https://docs.deno.com/runtime/getting_started/ins
 3. 为服务用户创建虚拟环境：
 
    ```bash
-   sudo -u framenote python3.10 -m venv /opt/framenote/releases/v0.2.0/.venv
+   sudo -u framenote python3.10 -m venv /opt/framenote/releases/v0.2.1/.venv
    ```
 
 4. 安装 wheel：
 
    ```bash
-   sudo -u framenote /opt/framenote/releases/v0.2.0/.venv/bin/python -m pip install \
+   sudo -u framenote /opt/framenote/releases/v0.2.1/.venv/bin/python -m pip install \
      'WHEEL_PATH[asr]'
    ```
 
@@ -232,14 +232,14 @@ Ubuntu 按 [Deno 安装说明](https://docs.deno.com/runtime/getting_started/ins
 5. 准备模型：
 
    ```bash
-   sudo -u framenote /opt/framenote/releases/v0.2.0/.venv/bin/python -m framenote.models \
+   sudo -u framenote /opt/framenote/releases/v0.2.1/.venv/bin/python -m framenote.models \
      prepare --out /opt/framenote/models
    ```
 
 6. 核验模型：
 
    ```bash
-   sudo -u framenote /opt/framenote/releases/v0.2.0/.venv/bin/python -m framenote.models \
+   sudo -u framenote /opt/framenote/releases/v0.2.1/.venv/bin/python -m framenote.models \
      verify --out /opt/framenote/models
    ```
 
@@ -261,7 +261,7 @@ Ubuntu 按 [Deno 安装说明](https://docs.deno.com/runtime/getting_started/ins
    首次安装时建立版本指针：
 
    ```bash
-   sudo -u framenote ln -s releases/v0.2.0 /opt/framenote/current
+   sudo -u framenote ln -s releases/v0.2.1 /opt/framenote/current
    ```
 
    已有 `current` 或旧版服务时，使用[升级切换](RELEASING.md#升级切换)流程，保留原环境。

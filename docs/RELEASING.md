@@ -2,6 +2,26 @@
 
 每次部署绑定一个版本、源码提交和独立环境。回滚使用保留的上一版环境；任务数据、配置和模型按各自兼容性处理。
 
+## 版本规则
+
+版本对应一次正式交付，日常提交不逐次升版本。准备发布时，查看上个发布标签到当前提交的最终差异，汇总用户可见变化，选择版本并更新唯一版本来源和 `CHANGELOG.md`。测试、审查及最终安装包隔离验证通过后，再合并并推送主分支与标签。
+
+| 改动 | 处理方式 |
+| --- | --- |
+| 错字、排版、补充已有用法等纯说明文档修改 | 正常提交，不单独发版，不改变已发布包 |
+| 修正已有行为、兼容性、安全或运行依赖问题 | 递增修订号，例如 `0.2.0` → `0.2.1` |
+| 新增 CLI / HTTP / MCP 功能或用户可用的执行工作流 | 递增次版本、修订号归零，例如 `0.2.1` → `0.3.0` |
+| 不兼容的接口、配置或材料变化 | 当前 `0.x` 阶段递增次版本，明确迁移和回滚限制；进入 `1.x` 后递增主版本 |
+| 提供候选包验收 | 使用 Python 包版本格式，例如 `0.3.0rc1`，标签为 `v0.3.0rc1` |
+
+判断依据是实际行为，而不是文件扩展名。`SKILL.md` 只调整措辞属于纯说明；修正已有 Agent 执行错误按修复发布，新增执行能力按功能发布。客户端、配置和随源码归档交付的 Skill 都属于项目交付范围，即使服务端代码没有改变。
+
+文档可以继续在 `main` 更新。需要再次交付包含修改的完整发行包时，使用新版本；不能从最新 `main` 重建并覆盖同名旧包，也不移动已发布标签。重新部署既有版本时，使用原发布包及其校验值。
+
+客户端与服务端可分别更新：只修改客户端或 Skill 时，依据接口兼容性决定是否更新服务。`/api/health` 报告的是运行中的服务版本，不表示本机客户端已同步；客户端 / Skill 的发布来源由对应源码归档版本和校验值确定。
+
+v0.2.1 是现有通用工作流与客户端保护的修订发布，沿用 v0.2.0 的接口和材料格式。软件版本号与材料格式号分别维护，回滚仍按下文核对目标版本的实际兼容范围。
+
 ## 识别运行版本
 
 版本唯一来源为 `framenote/__init__.py` 的 `__version__`，打包元数据从这里读取。查询本机安装或运行中的服务：
@@ -25,9 +45,9 @@ curl --fail http://127.0.0.1:18121/api/health
 3. 在目标平台的最终版本目录创建环境并安装这份 wheel。例如 Ubuntu：
 
    ```bash
-   python3.10 -m venv /opt/framenote/releases/v0.2.0/.venv
-   /opt/framenote/releases/v0.2.0/.venv/bin/python -m pip install \
-     '/path/to/framenote-0.2.0-py3-none-any.whl[asr]'
+   python3.10 -m venv /opt/framenote/releases/v0.2.1/.venv
+   /opt/framenote/releases/v0.2.1/.venv/bin/python -m pip install \
+     '/path/to/framenote-0.2.1-py3-none-any.whl[asr]'
    ```
 
    按服务用户执行并事先准备目录权限。在最终绝对路径创建环境，后续只切换 `current` 指针，不移动虚拟环境。Python 虚拟环境中的脚本依赖原路径，参见 [Python 文档](https://docs.python.org/3.12/library/venv.html#how-venvs-work)。
@@ -36,10 +56,10 @@ curl --fail http://127.0.0.1:18121/api/health
 
    ```bash
    cd /
-   /opt/framenote/releases/v0.2.0/.venv/bin/python -m framenote.release archive \
-     --wheel /path/to/framenote-0.2.0-py3-none-any.whl \
-     --sdist /path/to/framenote-0.2.0.tar.gz \
-     --output /opt/framenote/artifacts/v0.2.0
+   /opt/framenote/releases/v0.2.1/.venv/bin/python -m framenote.release archive \
+     --wheel /path/to/framenote-0.2.1-py3-none-any.whl \
+     --sdist /path/to/framenote-0.2.1.tar.gz \
+     --output /opt/framenote/artifacts/v0.2.1
    ```
 
    工具先执行 `pip check`，核对安装环境、wheel 和源码归档的构建身份一致，再保存：
@@ -57,14 +77,14 @@ curl --fail http://127.0.0.1:18121/api/health
 5. 核验归档：
 
    ```bash
-   /opt/framenote/releases/v0.2.0/.venv/bin/python -m framenote.release verify \
-     /opt/framenote/artifacts/v0.2.0
+   /opt/framenote/releases/v0.2.1/.venv/bin/python -m framenote.release verify \
+     /opt/framenote/artifacts/v0.2.1
    ```
 
 6. 候选环境验收通过后，为同一个构建提交创建标签：
 
    ```bash
-   git tag -a v0.2.0 -m 'FrameNote v0.2.0' VERIFIED_COMMIT
+   git tag -a v0.2.1 -m 'FrameNote v0.2.1' VERIFIED_COMMIT
    ```
 
    `VERIFIED_COMMIT` 必须等于发布包中的完整提交号。标签发布后不移动；后续修复使用新版本。构建、打标签、推送发布包和生产部署是可分别完成的步骤。
@@ -72,10 +92,10 @@ curl --fail http://127.0.0.1:18121/api/health
 依赖清单记录精确版本，不包含第三方 wheel 字节。即时回滚依靠保留的旧虚拟环境；需要离线重建时，还应在对应平台缓存清单里的 wheel：
 
 ```bash
-/opt/framenote/releases/v0.2.0/.venv/bin/python -m pip wheel \
-  --no-deps --find-links /opt/framenote/artifacts/v0.2.0 \
-  --wheel-dir /opt/framenote/wheelhouse/v0.2.0 \
-  -r /opt/framenote/artifacts/v0.2.0/requirements.lock
+/opt/framenote/releases/v0.2.1/.venv/bin/python -m pip wheel \
+  --no-deps --find-links /opt/framenote/artifacts/v0.2.1 \
+  --wheel-dir /opt/framenote/wheelhouse/v0.2.1 \
+  -r /opt/framenote/artifacts/v0.2.1/requirements.lock
 ```
 
 wheel 缓存按平台和 Python 环境准备；只有源码分发的依赖会在此时构建 wheel，单独保存缓存校验值。系统 Python、ffmpeg、libsndfile 和 JavaScript 运行时的版本写入部署记录；应用目录切换不会恢复这些系统依赖。
@@ -84,8 +104,8 @@ wheel 缓存按平台和 Python 环境准备；只有源码分发的依赖会在
 
 | 路径 | 用途 |
 | --- | --- |
-| `/opt/framenote/releases/v0.2.0/.venv` | 本版独立环境，保留原绝对路径 |
-| `/opt/framenote/artifacts/v0.2.0` | 本版发布包与清单 |
+| `/opt/framenote/releases/v0.2.1/.venv` | 本版独立环境，保留原绝对路径 |
+| `/opt/framenote/artifacts/v0.2.1` | 本版发布包与清单 |
 | `/opt/framenote/current` | 指向当前版本目录的符号链接 |
 | `/etc/framenote/service.env` | 正式配置；备份与目标版本配套核对 |
 | `/var/lib/framenote` | 正式任务数据，独立于应用环境 |
@@ -104,7 +124,7 @@ wheel 缓存按平台和 Python 环境准备；只有源码分发的依赖会在
 3. 保留旧环境原目录。在 `/opt/framenote` 下准备临时链接，并以重命名原子切换 `current`。下面两条仅用于已经采用版本目录布局的 Linux 服务，目标版本须已验收；`.current-next` 须不存在：
 
    ```bash
-   sudo ln -s releases/v0.2.0 /opt/framenote/.current-next
+   sudo ln -s releases/v0.2.1 /opt/framenote/.current-next
    sudo mv -Tf /opt/framenote/.current-next /opt/framenote/current
    ```
 
@@ -122,7 +142,7 @@ wheel 缓存按平台和 Python 环境准备；只有源码分发的依赖会在
 | 当前数据经目标版本验证可读，配置与模型也兼容 | 复用 workspace，切回目标版本原目录，并使用匹配配置 / 模型 |
 | 包含目标版本不支持的材料或任务状态 | 用升级前备份创建新的恢复 workspace，让旧服务指向该副本；升级后 workspace 完整保留 |
 
-例如 `87e341f` 的早期构建不能读取 v3 字幕材料；`v0.2.0` 可以读取 v1 / v2 / v3。软件版本号与材料格式版本是两个不同的标识。版本清单列出已知格式范围；运行队列、操作状态及配置也应在副本上用目标环境检查，不能只比较一个格式数字。
+例如 `87e341f` 的早期构建不能读取 v3 字幕材料；`v0.2.0` 和 `v0.2.1` 可以读取 v1 / v2 / v3。软件版本号与材料格式版本是两个不同的标识。版本清单列出已知格式范围；运行队列、操作状态及配置也应在副本上用目标环境检查，不能只比较一个格式数字。
 
 具体恢复顺序：
 
