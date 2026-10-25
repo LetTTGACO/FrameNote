@@ -18,15 +18,25 @@ import urllib.parse
 import urllib.request
 import uuid
 
-ARTIFACTS = {"metadata.json", "transcript.json", "transcript.md", "transcript.srt", "asr.raw.json", "frames.json"}
+ARTIFACTS = {"metadata.json", "transcript.json", "transcript.md", "transcript.srt", "asr.raw.json", "frames.json",
+             "subtitle.raw.json", "subtitle_attempts.json"}
 CONFIG_KEYS = {"service_url", "notes_dir", "download_video"}
 VIDEO_SUFFIXES = {".mp4", ".mkv", ".mov", ".webm", ".avi", ".m4v", ".mpeg", ".mpg", ".ts", ".m4s"}
 
 
 def check_version(payload: dict) -> None:
     version = payload.get("schema_version", 1)
-    if type(version) is not int or version not in {1, 2}:
+    if type(version) is not int or version not in {1, 2, 3}:
         raise ValueError("Unsupported material schema version")
+
+
+def is_material_name(name: str) -> bool:
+    return name in ARTIFACTS or re.fullmatch(r"subtitle-[0-9]{4,}\.raw\.json", name) is not None
+
+
+def check_timeout(timeout: float) -> None:
+    if not math.isfinite(timeout) or timeout < 0:
+        raise ValueError("等待时间必须是有限的非负数")
 
 
 def user_config_path() -> Path:
@@ -150,11 +160,11 @@ class Client:
         self.base = service_url(base)
         self.opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
-    def request(self, method: str, path: str, data: dict | None = None) -> dict:
+    def request(self, method: str, path: str, data: dict | None = None, *, timeout: float = 120) -> dict:
         body = json.dumps(data).encode() if data is not None else None
         req = urllib.request.Request(self.base + path, data=body, method=method,
                                      headers={"Content-Type": "application/json"})
-        with self.opener.open(req, timeout=120) as response:
+        with self.opener.open(req, timeout=timeout) as response:
             return json.load(response)
 
     def upload(self, path: Path) -> dict:
@@ -242,7 +252,51 @@ class Client:
             return {**info, "relative_path": path.relative_to(output).as_posix(), "url": route,
                     "etag": response.headers.get("ETag")}
 
-    def fetch(self, task_id: str, output: Path, *, download_video: bool = False) -> dict:
+    def wait_operation(self, task_id: str, operation_id: str, *, timeout: float) -> dict:
+        """Wait on a public media operation; timeout returns the latest operation."""
+        check_timeout(timeout)
+        deadline = time.monotonic() + timeout
+        latest = None
+        while True:
+            remaining = max(0, deadline - time.monotonic())
+            query = urllib.parse.urlencode({"wait": min(45, remaining)})
+            try:
+                latest = self.request("GET", f"/api/task/{task_id}/operations/{operation_id}?{query}",
+                                      timeout=min(50, max(.001, remaining)) if timeout else 1)
+            except TimeoutError:
+                if latest is not None:
+                    return latest
+                raise TimeoutError(f"媒体等待超时，后台继续；用 operation {task_id} {operation_id} 继续查询") from None
+            if latest["status"] in {"completed", "failed", "cancelled"} or time.monotonic() >= deadline:
+                return latest
+            time.sleep(min(.2, max(0, deadline - time.monotonic())))
+
+    def _finish_operation(self, task_id: str, operation: dict, timeout: float) -> dict:
+        operation_id = operation["operation_id"]
+        if operation["status"] not in {"completed", "failed", "cancelled"}:
+            operation = self.wait_operation(task_id, operation_id, timeout=timeout)
+        if operation["status"] in {"failed", "cancelled"}:
+            raise RuntimeError(f"媒体操作 {operation_id}: {operation.get('error') or operation['status']}")
+        if operation["status"] != "completed":
+            raise TimeoutError(f"媒体等待超时，后台继续；用 operation {task_id} {operation_id} 继续查询，或重试原命令")
+        return operation
+
+    def request_frames(self, task_id: str, timestamps: list[float], *, timeout: float = 1800) -> dict:
+        """Request frames and return the completed public operation payload."""
+        check_timeout(timeout)
+        operation = self.request("POST", f"/api/task/{task_id}/frames",
+                                 {"timestamps": timestamps, "background": True})
+        return self._finish_operation(task_id, operation, timeout)
+
+    def prepare_video(self, task_id: str, *, timeout: float = 1800) -> dict:
+        """Prepare playable media and return the completed public operation payload."""
+        check_timeout(timeout)
+        operation = self.request("POST", f"/api/task/{task_id}/media", {"purpose": "video"})
+        return self._finish_operation(task_id, operation, timeout)
+
+    def fetch(self, task_id: str, output: Path, *, download_video: bool = False,
+              media_wait: float = 1800) -> dict:
+        check_timeout(media_wait)
         materials = output / "materials"
         previous = {}
         for directory in (output, materials):
@@ -255,7 +309,7 @@ class Client:
                 if value.get("service_url", self.base).rstrip("/") != self.base:
                     raise ValueError("材料目录属于其他服务，请使用另一个 --out-dir。")
                 previous = value
-            elif any((directory / name).exists() for name in ARTIFACTS):
+            elif directory.exists() and any(is_material_name(path.name) for path in directory.iterdir()):
                 raise ValueError("目录已有未标记任务身份的材料，请使用新的 --out-dir。")
         if (output / "bundle.json").exists():
             raise ValueError("目录仍使用旧版布局，请先将原始材料及截图整理到 materials/。")
@@ -268,7 +322,7 @@ class Client:
             raise ValueError("Artifact manifest belongs to a different task")
         materials.mkdir(parents=True, exist_ok=True)
         bundle_path = materials / "bundle.json"
-        bundle = {"schema_version": 2, "service_url": self.base, "task_id": task_id, "task": task,
+        bundle = {"schema_version": max(2, manifest.get("schema_version", 1)), "service_url": self.base, "task_id": task_id, "task": task,
                   "directory": str(output.resolve()), "materials_directory": str(materials.resolve()),
                   "download_video": download_video, "download_complete": False}
         if "video" in previous:
@@ -276,7 +330,7 @@ class Client:
         write_json(bundle_path, bundle)
         for item in manifest["artifacts"]:
             name = item["name"]
-            if name in ARTIFACTS:
+            if is_material_name(name):
                 self.download(f"/api/task/{task_id}/artifacts/{name}", materials / name)
         if any(item["name"] == "frames.json" for item in manifest["artifacts"]):
             frames = json.loads((materials / "frames.json").read_text(encoding="utf-8"))
@@ -288,14 +342,18 @@ class Client:
                 self.download(f"/api/task/{task_id}/frames/{frame_id}", output / frame["relative_path"])
             (materials / "frames.json").write_text(json.dumps(frames, ensure_ascii=False, indent=2), encoding="utf-8")
         if download_video:
+            self.prepare_video(task_id, timeout=media_wait)
+            task = self.request("GET", f"/api/task/{task_id}")
+            if task.get("task_id") != task_id:
+                raise ValueError("Service returned a different task")
+            bundle["task"] = task
             bundle["video"] = self.retrieve_video(task, output, previous.get("video"))
         bundle["download_complete"] = True
         write_json(bundle_path, bundle)
         return bundle
 
     def wait(self, task_id: str, timeout: float) -> dict:
-        if not math.isfinite(timeout) or timeout < 0:
-            raise ValueError("等待时间必须是有限的非负数")
+        check_timeout(timeout)
         deadline, previous = time.monotonic() + timeout, None
         while True:
             task = self.request("GET", f"/api/task/{task_id}")
@@ -321,6 +379,7 @@ def main() -> None:
     transcribe = command("transcribe")
     transcribe.add_argument("source", help="B站/抖音/YouTube 链接或本地视频路径")
     transcribe.add_argument("--wait", type=float, default=1800)
+    transcribe.add_argument("--force-asr", action="store_true")
     transcribe.add_argument("--out-dir", type=Path, required=True, help="笔记根目录；材料归入 materials/")
     frames = command("frames")
     frames.add_argument("task_id")
@@ -329,6 +388,15 @@ def main() -> None:
     fetch = command("fetch")
     fetch.add_argument("task_id")
     fetch.add_argument("--out-dir", type=Path, required=True)
+    frames.add_argument("--wait", type=float, default=1800)
+    fetch.add_argument("--wait", type=float, default=1800)
+    operation = command("operation")
+    operation.add_argument("task_id")
+    operation.add_argument("operation_id")
+    operation.add_argument("--wait", type=float, default=45)
+    cancel_operation = command("cancel-operation")
+    cancel_operation.add_argument("task_id")
+    cancel_operation.add_argument("operation_id")
     for name in ("status", "cancel", "artifacts"):
         command(name).add_argument("task_id")
     wait = command("wait")
@@ -364,6 +432,7 @@ def main() -> None:
             except OSError:
                 local = False
             payload = {"upload_task_id": client.upload(source)["upload_task_id"]} if local else {"video_url": args.source}
+            payload["force_asr"] = args.force_asr
             task_id = client.request("POST", "/api/transcribe", payload)["task_id"]
             print(json.dumps({"task_id": task_id}), file=sys.stderr, flush=True)
             task = client.wait(task_id, args.wait)
@@ -376,8 +445,13 @@ def main() -> None:
                 raise RuntimeError(task.get("error") or task["status"])
         elif args.command in {"frames", "fetch"}:
             if args.command == "frames":
-                client.request("POST", f"/api/task/{args.task_id}/frames", {"timestamps": args.timestamps})
-            result = client.fetch(args.task_id, args.out_dir, download_video=config["download_video"])
+                client.request_frames(args.task_id, args.timestamps, timeout=args.wait)
+            result = client.fetch(args.task_id, args.out_dir, download_video=config["download_video"],
+                                  media_wait=args.wait)
+        elif args.command == "operation":
+            result = client.wait_operation(args.task_id, args.operation_id, timeout=args.wait)
+        elif args.command == "cancel-operation":
+            result = client.request("POST", f"/api/task/{args.task_id}/operations/{args.operation_id}/cancel")
         elif args.command == "wait":
             result = client.wait(args.task_id, args.timeout)
         elif args.command == "tasks":

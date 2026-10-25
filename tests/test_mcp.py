@@ -47,8 +47,8 @@ def test_http_material_workflow_and_restart(tmp_path, video, monkeypatch):
         assert initialized["serverInfo"]["name"] == "FrameNote"
         assert "Space" in initialized["instructions"]
         tools = {tool["name"]: tool for tool in rpc(client, "tools/list")["tools"]}
-        assert set(tools) == TOOLS
-        assert set(tools["transcribe_video"]["inputSchema"]["properties"]) == {"video_url"}
+        assert set(tools) == TOOLS | {"prepare_video", "get_operation", "cancel_operation"}
+        assert set(tools["transcribe_video"]["inputSchema"]["properties"]) == {"video_url", "force_asr"}
         assert tools["get_frame"]["annotations"]["readOnlyHint"] is True
         assert tools["extract_frames"]["annotations"]["readOnlyHint"] is False
         assert tools["transcribe_video"]["annotations"]["openWorldHint"] is True
@@ -157,4 +157,85 @@ async def test_stdio_configuration_and_real_protocol(tmp_path, monkeypatch):
     async with stdio_client(StdioServerParameters(command=sys.executable, args=["-m", "framenote.service_mcp"])) as (read, write):
         async with ClientSession(read, write) as session:
             assert (await session.initialize()).serverInfo.name == "FrameNote"
-            assert {tool.name for tool in (await session.list_tools()).tools} == TOOLS
+            assert {tool.name for tool in (await session.list_tools()).tools} == TOOLS | {"prepare_video", "get_operation", "cancel_operation"}
+
+
+@pytest.mark.asyncio
+async def test_mcp_pending_frames_returns_operation_then_real_images():
+    calls = []
+    state = {"status": "processing"}
+    async def request(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        if path.endswith("/frames/f1"):
+            return httpx.Response(200, content=b"\xff\xd8actual-image")
+        return httpx.Response(200, json={"operation_id": "b" * 32, "task_id": "a" * 32,
+            "kind": "frames", "status": state["status"], "result": {"frames": [{"frame_id": "f1"}] if state["status"] == "completed" else []}})
+    tools = MaterialTools(request)
+    result = await tools.extract_frames("a" * 32, [12])
+    assert result["operation"]["status"] == "processing"
+    assert calls[0][2]["json"] == {"timestamps": [12], "background": True}
+    assert calls[1][1].endswith("/operations/" + "b" * 32)
+    assert calls[1][2]["params"]["wait"] == 0
+    assert calls[2][2]["params"]["wait"] == 45
+    state["status"] = "completed"
+    op = await tools.get_operation("a" * 32, "b" * 32, timeout_seconds=0)
+    assert op["result"]["frames"] == [{"frame_id": "f1"}]
+    image = await tools.get_frame("a" * 32, "f1")
+    assert image.data == b"\xff\xd8actual-image"
+    assert (await tools.extract_frames("a" * 32, [12]))["frames"] == [{"frame_id": "f1"}]
+
+
+@pytest.mark.asyncio
+async def test_mcp_video_preparation_and_force_asr_forward_public_fields_only():
+    calls = []
+    async def request(method, path, **kwargs):
+        calls.append((method, path, kwargs))
+        return httpx.Response(200, json={"operation_id": "b" * 32, "status": "completed",
+                                       "result": {"downloads": {"video": "/api/task/a/video"}}})
+    tools = MaterialTools(request)
+    await tools.transcribe_video("https://b23.tv/example", force_asr=True)
+    assert calls[0][2]["json"] == {"video_url": "https://b23.tv/example", "force_asr": True}
+    prepared = await tools.prepare_video("a" * 32)
+    assert prepared["operation"]["status"] == "completed"
+    assert prepared["downloads"]["video"] == "/api/task/a/video"
+    assert calls[-1] == ("POST", "/api/task/" + "a" * 32 + "/media", {"json": {"purpose": "video"}})
+    await tools.cancel_operation("a" * 32, "b" * 32)
+    assert calls[-1][1].endswith("/operations/" + "b" * 32 + "/cancel")
+
+
+def test_mcp_retains_original_nine_tool_names_and_operation_annotations(tmp_path):
+    with TestClient(create_app(Settings.from_env({}, base_dir=tmp_path)), base_url="http://localhost") as client:
+        tools = {tool["name"]: tool for tool in rpc(client, "tools/list")["tools"]}
+        assert TOOLS <= tools.keys()
+        assert len(tools) == 12
+        assert set(tools["transcribe_video"]["inputSchema"]["properties"]) == {"video_url", "force_asr"}
+        assert tools["get_operation"]["annotations"]["readOnlyHint"] is True
+        for name in ("extract_frames", "prepare_video"):
+            assert tools[name]["annotations"]["openWorldHint"] is True
+            assert tools[name]["annotations"]["readOnlyHint"] is False
+        assert tools["cancel_operation"]["annotations"]["idempotentHint"] is True
+        for timeout in (-1, 46):
+            assert call(client, "get_operation", task_id="a" * 32, operation_id="b" * 32,
+                        timeout_seconds=timeout)["isError"]
+
+
+@pytest.mark.asyncio
+async def test_mcp_operation_transport_timeout_preserves_resumable_id():
+    async def request(method, path, **kwargs):
+        if method == "POST":
+            return httpx.Response(202, json={"operation_id": "b" * 32, "status": "processing"})
+        raise asyncio.TimeoutError()
+    tools = MaterialTools(request)
+    assert (await tools.extract_frames("a" * 32, [1]))["operation"]["operation_id"] == "b" * 32
+    with pytest.raises(TimeoutError, match="b" * 32):
+        await tools.get_operation("a" * 32, "b" * 32)
+
+
+@pytest.mark.asyncio
+async def test_mcp_operation_wait_budget_returns_latest_pending_payload():
+    operation = {"operation_id": "b" * 32, "status": "processing", "phase": "acquisition"}
+    async def request(method, path, **kwargs):
+        if kwargs["params"]["wait"]:
+            raise asyncio.TimeoutError()
+        return httpx.Response(200, json=operation)
+    assert await MaterialTools(request).get_operation("a" * 32, "b" * 32, timeout_seconds=1) == operation

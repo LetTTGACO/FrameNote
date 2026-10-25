@@ -296,6 +296,14 @@ def material_server():
     class Handler(BaseHTTPRequestHandler):
         def log_message(self, *args):
             pass
+        def do_POST(self):
+            state["requests"].append((self.path, None))
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            body = json.dumps({"operation_id": "op1", "status": "completed", "result": {}}).encode()
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
         def do_GET(self):
             state["requests"].append((self.path, self.headers.get("If-None-Match")))
             if self.path.endswith("/video"):
@@ -402,9 +410,11 @@ def test_service_workflow_with_standalone_cli_and_project_configuration(tmp_path
     (project / ".git").mkdir()
     (project / ".framenote.json").write_text(json.dumps({"service_url":base,"download_video":False}))
     note = project / "my-note"
+    copied_script = project / "headless.py"
+    shutil.copyfile(module.__file__, copied_script)
     environment = {key:value for key,value in os.environ.items() if not key.startswith("FRAMENOTE_")}
     def run(*args):
-        child = subprocess.run([sys.executable,"-S",module.__file__,*args], cwd=project, env=environment,
+        child = subprocess.run([sys.executable,"-S",str(copied_script),*args], cwd=project, env=environment,
                                capture_output=True,text=True,timeout=30)
         assert child.returncode == 0, child.stderr
         return json.loads(child.stdout)
@@ -439,3 +449,185 @@ def test_service_workflow_with_standalone_cli_and_project_configuration(tmp_path
         worker.join(timeout=10)
         listener.close()
         assert not worker.is_alive()
+
+
+def test_v3_fetch_gets_failed_track_originals_and_preserves_notes(tmp_path, monkeypatch):
+    client = module.Client("http://server:9")
+    bad_raw = b'{"body":"invalid track"}\n'
+    original_notes = b"User notes\n"
+    (tmp_path / "notes.md").write_bytes(original_notes)
+    names = ["transcript.json", "subtitle.raw.json", "subtitle_attempts.json", "subtitle-0001.raw.json",
+             "subtitle-10000.raw.json", "subtitle-１２３４.raw.json", "../notes.md", "cookie.json"]
+    monkeypatch.setattr(client, "request", lambda method, path: (
+        {"schema_version": 3, "task_id": "A", "artifacts": [{"name": name} for name in names]}
+        if path.endswith("/artifacts") else {"task_id": "A", "status": "completed"}))
+    def download(route, path):
+        path.write_bytes(bad_raw)
+    monkeypatch.setattr(client, "download", download)
+    bundle = client.fetch("A", tmp_path)
+    assert bundle["schema_version"] == 3
+    assert (tmp_path / "materials/subtitle-0001.raw.json").read_bytes() == bad_raw
+    assert (tmp_path / "materials/subtitle-10000.raw.json").read_bytes() == bad_raw
+    assert (tmp_path / "materials/subtitle.raw.json").read_bytes() == bad_raw
+    assert (tmp_path / "materials/subtitle_attempts.json").read_bytes() == bad_raw
+    assert (tmp_path / "notes.md").read_bytes() == original_notes
+    assert not (tmp_path / "materials/subtitle-１２３４.raw.json").exists()
+    assert not (tmp_path / "materials/cookie.json").exists()
+
+
+def test_v3_preflight_rejects_future_version_before_writes(tmp_path, monkeypatch):
+    client = module.Client("http://server:9")
+    materials = tmp_path / "materials"
+    materials.mkdir()
+    marker = materials / "bundle.json"
+    marker.write_text('{"schema_version":3,"task_id":"A"}')
+    (tmp_path / "notes.md").write_text("Keep notes")
+    before = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    monkeypatch.setattr(client, "request", lambda method, path: (
+        {"schema_version": 4, "artifacts": []} if path.endswith("/artifacts") else {"task_id": "A"}))
+    with pytest.raises(ValueError, match="schema version"):
+        client.fetch("A", tmp_path)
+    assert {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()} == before
+
+
+def test_video_fetch_waits_for_operation_before_download(tmp_path, monkeypatch):
+    client = module.Client("http://server:9")
+    calls = []
+    ready = False
+    def request(method, path, data=None, **kwargs):
+        nonlocal ready
+        calls.append((method, path, data))
+        if path.endswith("/media"):
+            return {"operation_id": "op1", "status": "processing"}
+        if "/operations/" in path:
+            ready = True
+            return {"operation_id": "op1", "status": "completed", "result": {"downloads": {"video": "/api/task/A/video"}}}
+        if path.endswith("/artifacts"):
+            return {"schema_version": 3, "artifacts": []}
+        return {"task_id": "A", "status": "completed", "downloads": {"video": "/api/task/A/video"} if ready else {}}
+    monkeypatch.setattr(client, "request", request)
+    def retrieve(task, output, previous):
+        calls.append(("GET", "video", None))
+        assert task["downloads"]["video"] == "/api/task/A/video"
+        return {"relative_path": "materials/video.mp4"}
+    monkeypatch.setattr(client, "retrieve_video", retrieve)
+    assert client.fetch("A", tmp_path, download_video=True)["download_complete"]
+    assert next(i for i, call in enumerate(calls) if call[1].endswith("/media")) < calls.index(("GET", "video", None))
+    assert sum(path == "/api/task/A" for _, path, _ in calls) == 2
+
+
+@pytest.mark.parametrize("status", ["failed", "cancelled"])
+def test_operation_failure_keeps_bundle_incomplete_and_video_unchanged(tmp_path, monkeypatch, status):
+    client = module.Client("http://server:9")
+    materials = tmp_path / "materials"
+    materials.mkdir()
+    video_path = materials / "video.mp4"
+    original_video = b"existing video"
+    video_path.write_bytes(original_video)
+    (materials / "bundle.json").write_text('{"schema_version":3,"task_id":"A"}')
+    (tmp_path / "notes.md").write_text("Keep my reading")
+    monkeypatch.setattr(client, "request", lambda method, path, *args, **kwargs: (
+        {"operation_id": "op1", "status": status, "error": {"code": "media_failed"}}
+        if path.endswith("/media") else {"schema_version": 3, "artifacts": []}
+        if path.endswith("/artifacts") else {"task_id": "A", "status": "completed"}))
+    with pytest.raises(RuntimeError, match="op1"):
+        client.fetch("A", tmp_path, download_video=True)
+    assert json.loads((materials / "bundle.json").read_text())["download_complete"] is False
+    assert video_path.read_bytes() == original_video
+    assert (tmp_path / "notes.md").read_text() == "Keep my reading"
+
+
+def test_waiting_media_ignores_completed_text_status(monkeypatch):
+    client = module.Client("http://server:9")
+    calls = []
+    def request(method, path, data=None, **kwargs):
+        calls.append((method, path, data))
+        if path.endswith("/frames"):
+            return {"operation_id": "op1", "status": "processing"}
+        assert "/operations/op1" in path
+        return {"operation_id": "op1", "status": "completed", "result": {"frames": [{"frame_id": "f1"}]}}
+    monkeypatch.setattr(client, "request", request)
+    result = client.request_frames("A", [12], timeout=1)
+    assert result["status"] == "completed"
+    assert calls[0][2] == {"timestamps": [12], "background": True}
+    assert len(calls) == 2
+
+
+def test_operation_timeout_can_resume_same_id(monkeypatch):
+    client = module.Client("http://server:9")
+    state = {"status": "processing"}
+    monkeypatch.setattr(client, "request", lambda method, path, *args, **kwargs:
+                        {"operation_id": "op1", "status": state["status"]})
+    assert client.wait_operation("A", "op1", timeout=0)["status"] == "processing"
+    with pytest.raises(TimeoutError, match="op1"):
+        client.prepare_video("A", timeout=0)
+    state["status"] = "completed"
+    assert client.wait_operation("A", "op1", timeout=0)["status"] == "completed"
+
+
+@pytest.mark.parametrize("timeout", [-1, float("inf"), float("nan")])
+def test_invalid_media_timeout_rejected_before_request(monkeypatch, timeout):
+    client = module.Client("http://server:9")
+    monkeypatch.setattr(client, "request", lambda *args, **kwargs: pytest.fail("invalid wait must not submit"))
+    with pytest.raises(ValueError):
+        client.request_frames("A", [1], timeout=timeout)
+
+
+def test_force_asr_is_forwarded_without_credentials(tmp_path, monkeypatch, capsys):
+    calls = []
+    monkeypatch.setattr(module.Client, "request", lambda self, method, path, data=None:
+                        calls.append((path, data)) or {"task_id": "A"})
+    monkeypatch.setattr(module.Client, "wait", lambda *args: {"status": "completed"})
+    monkeypatch.setattr(module.Client, "fetch", lambda *args, **kwargs: {})
+    monkeypatch.setattr(sys, "argv", ["headless.py", "transcribe", "https://b23.tv/abc", "--force-asr", "--out-dir", str(tmp_path)])
+    module.main()
+    assert calls == [("/api/transcribe", {"video_url": "https://b23.tv/abc", "force_asr": True})]
+    capsys.readouterr()
+
+
+def test_cli_media_wait_and_operation_commands(monkeypatch, tmp_path, capsys):
+    calls = []
+    monkeypatch.setattr(module.Client, "request_frames", lambda self, *args, **kwargs: calls.append((args, kwargs)) or {})
+    monkeypatch.setattr(module.Client, "fetch", lambda self, *args, **kwargs: kwargs)
+    monkeypatch.setattr(sys, "argv", ["headless.py", "frames", "A", "--timestamps", "12", "--out-dir", str(tmp_path), "--wait", "5"])
+    module.main()
+    assert calls == [(("A", [12.0]), {"timeout": 5.0})]
+    assert json.loads(capsys.readouterr().out)["media_wait"] == 5
+    monkeypatch.setattr(module.Client, "wait_operation", lambda self, *args, **kwargs: {"args": args, **kwargs})
+    monkeypatch.setattr(sys, "argv", ["headless.py", "operation", "A", "op1", "--wait", "0"])
+    module.main()
+    assert json.loads(capsys.readouterr().out) == {"args": ["A", "op1"], "timeout": 0}
+    monkeypatch.setattr(module.Client, "request", lambda self, method, path: {"method": method, "path": path})
+    monkeypatch.setattr(sys, "argv", ["headless.py", "cancel-operation", "A", "op1"])
+    module.main()
+    assert json.loads(capsys.readouterr().out) == {"method": "POST", "path": "/api/task/A/operations/op1/cancel"}
+
+
+def test_operation_long_poll_bounds_each_request_and_reports_timeout_id(monkeypatch):
+    client = module.Client("http://server:9")
+    timeouts = []
+    def request(method, path, **kwargs):
+        timeouts.append(kwargs["timeout"])
+        raise TimeoutError("socket timed out")
+    monkeypatch.setattr(client, "request", request)
+    with pytest.raises(TimeoutError, match="op1"):
+        client.wait_operation("A", "op1", timeout=1800)
+    assert 0 < timeouts[0] <= 50
+
+
+def test_media_timeout_preserves_existing_video_and_incomplete_marker(tmp_path, monkeypatch):
+    client = module.Client("http://server:9")
+    materials = tmp_path / "materials"
+    materials.mkdir()
+    (materials / "bundle.json").write_text('{"task_id":"A","schema_version":3}')
+    (materials / "video.mp4").write_bytes(b"original video")
+    (tmp_path / "notes.md").write_bytes(b"original notes")
+    monkeypatch.setattr(client, "request", lambda method, path, *args, **kwargs: (
+        {"operation_id": "op1", "status": "processing"} if path.endswith("/media") or "/operations/" in path
+        else {"schema_version": 3, "artifacts": []} if path.endswith("/artifacts")
+        else {"task_id": "A", "status": "completed"}))
+    with pytest.raises(TimeoutError, match="op1"):
+        client.fetch("A", tmp_path, download_video=True, media_wait=0)
+    assert json.loads((materials / "bundle.json").read_text())["download_complete"] is False
+    assert (materials / "video.mp4").read_bytes() == b"original video"
+    assert (tmp_path / "notes.md").read_bytes() == b"original notes"
