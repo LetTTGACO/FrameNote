@@ -125,6 +125,9 @@ async def acquire(root: Path, task_id: str, url: str, *, mode: str = "full") -> 
             metadata["source_has_audio"] = True
         atomic_json(directory / "acquisition.json", {"video": asset.name, "audio": audio.name,
                                                      "metadata": metadata, "notes": notes})
+    except BilibiliInputError as error:
+        atomic_json(directory / "source-resolution.json", {"error": {"code": error.code, "message": str(error)}})
+        raise
     except Exception:
         if is_bilibili:
             raise RuntimeError("Bilibili media acquisition failed") from None

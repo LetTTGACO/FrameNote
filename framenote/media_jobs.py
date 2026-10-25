@@ -107,6 +107,18 @@ class MediaJobs:
             for value in matching:
                 if value['status'] == 'completed' and self._cache_valid(value):
                     return self._public(value)
+            # Prefer the deepest failed/cancelled retry chain; independent chains
+            # tie-break by operation ID so filesystem order cannot change selection.
+            ancestors = {value['operation_id']: value for value in matching}
+            def retry_order(value: dict) -> tuple[int, str]:
+                seen: set[str] = set()
+                parent = value.get('retry_of')
+                while isinstance(parent, str) and parent in ancestors and parent not in seen:
+                    seen.add(parent)
+                    parent = ancestors[parent].get('retry_of')
+                return len(seen), value['operation_id']
+            retry = max((value for value in matching if value['status'] in {'failed', 'cancelled'}),
+                        key=retry_order, default=None)
         value = {'operation_id': uuid.uuid4().hex, 'task_id': task_id, 'kind': kind,
                  'status': 'queued', 'phase': 'queued', 'request': request,
                  'result': {'frames': []} if kind == 'frames' else {}, 'error': None}

@@ -63,6 +63,24 @@ N100 Ubuntu x86_64 / Python 3.10 的新代码原生验证也未执行：当前�
 
 完整本地证据保存在隔离验收工作区的 `native-probes/`（`local-native-smoke.json`、`final-restart-cache.json`、`anonymous-asr-smoke.json`、`anonymous-media-smoke.json`、`synthetic-credential-management.json`、`synthetic-invalid-smoke.json`）及交付报告。公开记录只保留脱敏事实，不提交媒体、凭据或本地验收目录。
 
+## 2026-10-25：最终评审修复复验
+
+本轮基于 `faa4f539d34b30b50bedfc654f7132ff8e7705aa`，只修复元数据暂时不可达后旧获取路径的无效分 P 处理、重复原截图请求的部分结果继承，以及单次请求超时的有限重试分类。上方 `ff5b5ac` 的原生推理和五文件一致性比对属于当时的历史证据；本轮修改了 `service_acquire.py` 与 `media_jobs.py`，不能把该一致性声明延伸到当前源码。
+
+最终源码在本地 Python 3.12.13 与 3.10.20 完整 pytest 均为 `566 passed, 2 skipped, 1 warning`，退出码均为 0；mypy 为 `Success: no issues found in 25 source files`。两项默认跳过仍是可选发行检查，一条警告仍是原有 Starlette TestClient 依赖弃用提示。完整日志、最终归档与单独启用发行检查的结果保存在本轮本地交付报告中。
+
+复用上述 20 秒本地任务 `b60b0426a0e14b48a41742b8c90e11de`，在 loopback `18122` 启动最终源码的隔离 editable 服务，`/api/ready` 实际返回 200、SenseVoice configured/available 均为 true。本次未重复 ASR，也未访问外部平台。使用新的 `[3.345, 13.345]` 帧点、`background=true`，通过真实 HTTP POST 验证部分失败后的原命令重试：
+
+- 隔离启动脚本在第二个帧点首次调用时，把解码器输入替换为一个不存在的本地文件，真实解码子进程因此失败。运行源码和原媒体未改写；这是一项明确注入失败的本地恢复验证。
+- 原操作 `874e46f03a4349d3bc72f9f49fdefbf0` 失败并保留第一帧；重复完全相同的 POST 创建 `0fba87f5d63f4f0990f82e763736a645`，其 `retry_of` 指回原操作，随后完成。
+- 第一帧 ID `821fc27dc4d046f2b9fb319cca1a7952`、实际 PTS `3.366667`、121,667 字节及 SHA-256 `bb17c46d48afb2c0be93dfb1772b35b05373bb7ac37e22fb15d1fe752477a861` 均保留。第二帧实际 PTS 为 `13.366667`；解码器调用序列恰为 `[3.345, 13.345, 13.345]`。
+- 原失败操作回读不变；第三次相同 POST 返回 HTTP 200 和已完成重试缓存。`transcript.json`、`asr.raw.json`、`source.mp4` 的前后 SHA-256 均相同，分别为 `72a0d898bfd6d9db3c6112265a46ad60763b14032b6ef6b0629ae675c3e34432`、`9e503cea656e0307f0bbb0c8125931a656d49f8ac91d43c7f4efe198699a2f17`、`6110e4ae401eaea855db6586acfe21d0107dde7dad2d8ec529bac7260e331425`。
+- 拥有的服务收到 SIGTERM 后完成 application shutdown，进程返回 `-15`，端口确认关闭。
+
+本次实际测试的 `media_jobs.py` SHA-256 为 `5543f303015528b84bfa03a48f1c4cc210b13e268bd64a05d5d63cdcec3283d2`；四个修改后运行模块的完整哈希、操作对象、调用序列和关闭记录见本地 `native-probes/final-fix-native.json`。初次启动脚本误将正常 SIGTERM 的 `-15` 当作断言失败，随后修正该验证假设、保留初次日志，并以新帧点重新完成全部检查。
+
+上述有效登录字幕阳性、认证 `no_tracks`、真实账号过期、真实字幕任务的按需媒体与 force-ASR 保留，以及 N100 新代码原生验收仍待完成。本轮本地恢复测试不能替代这些平台和部署组合的验收。
+
 ## 2026-10-20：历史版本验收
 
 本记录供维护者复核 FrameNote 0.1.0 在 Ubuntu N100 和 Apple Silicon Mac 上的安装、推理、任务生命周期及笔记阅读结果。初验和最终复验分别绑定 wheel 哈希与代码提交；其中的 MCP 调用和测试数量描述对应版本的历史行为。部署操作见[部署指南](DEPLOYMENT.md)。

@@ -256,7 +256,7 @@ def test_http_protocol_body_failures_are_classified_and_bounded(transport):
     assert transport.sleeps == [1, 2]
 
 
-@pytest.mark.parametrize('stage_deadline, chunk_seconds, expected_reads', [(160, 7, 3), (105, 2, 3)])
+@pytest.mark.parametrize('stage_deadline, chunk_seconds, expected_reads', [(200, 7, 3), (105, 2, 3)])
 def test_streaming_body_stops_at_earlier_attempt_or_stage_deadline(transport, stage_deadline, chunk_seconds, expected_reads):
     class DripResponse(Response):
         def __init__(self):
@@ -272,14 +272,14 @@ def test_streaming_body_stops_at_earlier_attempt_or_stage_deadline(transport, st
             self.reads += 10
             return b'x' * 10
     response = DripResponse()
-    transport.outcomes = [response]
+    transport.outcomes = [response, DripResponse(), DripResponse()]
     with pytest.raises(BilibiliHTTPError) as error:
         BilibiliHTTP(None, deadline=stage_deadline).download('https://i0.hdslb.com/body', referer='https://www.bilibili.com/')
-    assert error.value.code == 'deadline_exceeded'
+    assert error.value.code == ('attempt_timeout' if stage_deadline == 200 else 'deadline_exceeded')
     assert response.reads == expected_reads
     assert response.closed
-    assert len(transport.requests) == 1
-    assert transport.sleeps == []
+    assert len(transport.requests) == (3 if stage_deadline == 200 else 1)
+    assert transport.sleeps == ([1, 2] if stage_deadline == 200 else [])
 
 
 def test_open_and_redirect_time_is_not_reset_for_body_read(transport):
@@ -300,7 +300,7 @@ def test_open_and_redirect_time_is_not_reset_for_body_read(transport):
         return response
     transport.open = opening
     with pytest.raises(BilibiliHTTPError) as error:
-        BilibiliHTTP(None, deadline=160).download('https://api.bilibili.com/body', referer='https://www.bilibili.com/')
+        BilibiliHTTP(None, deadline=120).download('https://api.bilibili.com/body', referer='https://www.bilibili.com/')
     assert error.value.code == 'deadline_exceeded'
     assert transport.timeouts == [20, 11]
     assert response.closed
@@ -577,3 +577,21 @@ def test_transports_classify_stage_expiry_during_final_network_failure(transport
     assert error.value.code == 'deadline_exceeded'
     assert len(transport.requests) == 3
     assert transport.sleeps == [1., 2.]
+
+
+@pytest.mark.parametrize('short', [False, True])
+def test_attempt_timeout_retries_then_succeeds_with_remaining_stage_budget(transport, short):
+    calls = []
+    def opening(request, timeout):
+        calls.append(timeout)
+        if len(calls) == 1:
+            transport.now += timeout + 0.1
+            return Response()
+        if short:
+            raise http_error(302, 'https://www.bilibili.com/video/BV1cfaf6SEA9')
+        return Response(b'{}')
+    transport.open = opening
+    client = BilibiliHTTP(None, deadline=200)
+    result = client.resolve_short_url('https://b23.tv/test') if short else client.get_json('https://api.bilibili.com/x')
+    assert result == ('https://www.bilibili.com/video/BV1cfaf6SEA9' if short else {})
+    assert len(calls) == 2 and transport.sleeps == [1]

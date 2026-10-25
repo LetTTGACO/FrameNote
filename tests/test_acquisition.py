@@ -745,3 +745,13 @@ async def test_native_worker_identity_conflict_is_persisted_before_media(tmp_pat
     assert json.loads((store.directory(task_id) / 'source-resolution.json').read_text()) == {
         'error': {'code': 'media_identity_mismatch'}}
     assert not (store.directory(task_id) / 'acquisition.video.json').exists()
+
+
+@pytest.mark.parametrize('kind', ['video', 'audio'])
+def test_cached_legacy_page_list_never_substitutes_first_page(tmp_path, monkeypatch, kind):
+    from framenote.subtitles import BilibiliInputError
+    processor = MediaDownloader(tmp_path)
+    monkeypatch.setattr(processor, '_bilibili_play_pages', lambda *args: ('bvid', [{'page': 1, 'cid': 101}]))
+    with pytest.raises(BilibiliInputError) as error:
+        processor._download_bilibili_media_via_api(_BILI_URL + '?p=9', tmp_path / 'media', None, kind)
+    assert error.value.code == 'invalid_video_part'

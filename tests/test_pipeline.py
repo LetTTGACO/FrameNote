@@ -802,3 +802,74 @@ async def test_unsafe_identity_resolution_after_safe_expansion_never_uses_legacy
     assert caught.value.code == 'invalid_video_url'
     assert attempts == ['safe_expansion', 'identity_resolution']
     assert json.loads((directory / 'source-resolution.json').read_text())['error']['code'] == 'invalid_video_url'
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('galaxy_enabled', [False, True])
+@pytest.mark.parametrize('mode', ['full', 'force_asr', 'video', 'audio'])
+@pytest.mark.parametrize('late_track', [False, True])
+async def test_metadata_outage_then_missing_part_preserves_input_error(
+        subtitle_pipeline, monkeypatch, galaxy_enabled, mode, late_track):
+    from dataclasses import replace
+    from framenote import service_acquire
+    from framenote.acquisition import MediaDownloader
+    from framenote.platform_http import BilibiliHTTPError
+    from framenote.subtitles import BilibiliInputError, SubtitleOutcome
+    pipeline, store, task_id, directory, identity, outcome, calls = subtitle_pipeline
+    pipeline.settings = replace(pipeline.settings, galaxy_enabled=galaxy_enabled)
+    monkeypatch.delattr(pipeline, 'acquire_upstream')
+    url = 'https://www.bilibili.com/video/BV1cfaf6SEA9?p=9'
+    store.update(task_id, video_url=url, force_asr=mode == 'force_asr')
+    def unavailable(*args):
+        raise BilibiliHTTPError('network_error', 'metadata unavailable')
+    def blocked(*args, **kwargs):
+        raise RuntimeError('HTTP Error 412')
+    view_calls = []
+    def view(self, api, params, headers):
+        assert api == self.BILI_VIEW_API  # No wrong CID playurl may be requested.
+        view_calls.append(params)
+        return {'code': 0, 'data': {'title': 'only P1', 'pages': [{'page': 1, 'cid': 101, 'duration': 5}]}}
+    async def worker(args, **kwargs):
+        try:
+            await service_acquire.acquire(store.root, task_id, url, mode='full' if mode == 'force_asr' else mode)
+        except Exception:
+            raise RuntimeError('Worker exited nonzero') from None
+    async def no_subtitles(*args):
+        return SubtitleOutcome(None, None, [], 'network_error')
+    async def forbidden(*args, **kwargs):
+        pytest.fail('Invalid P must never reach Galaxy')
+    monkeypatch.setattr(service_acquire, 'load_credentials', lambda *a, **k: (None, 'missing'))
+    monkeypatch.setattr(service_acquire.BilibiliClient, 'resolve', unavailable)
+    monkeypatch.setattr(MediaDownloader, '_ydl', blocked)
+    monkeypatch.setattr(MediaDownloader, '_bilibili_get_json', view)
+    if late_track:
+        async def info(*args, **kwargs):
+            return {'title': 'yt-dlp metadata succeeded'}
+        monkeypatch.setattr(MediaDownloader, 'get_video_info', info)
+    monkeypatch.setattr('framenote.service_pipeline.run_process', worker)
+    monkeypatch.setattr(pipeline, 'acquire_subtitles', no_subtitles)
+    for method in ('download', 'download_video', 'download_audio'):
+        monkeypatch.setattr('framenote.galaxy_downloader.GalaxyDownloader.' + method, forbidden)
+    if mode in {'full', 'force_asr'}:
+        jobs = Jobs(store, pipeline)
+        await jobs.start()
+        try:
+            jobs.enqueue(task_id)
+            await jobs.queue.join()
+            assert store.get(task_id)['status'] == 'failed'
+            assert store.get(task_id)['error']['code'] == 'invalid_video_part'
+            import httpx
+            app = create_app(pipeline.settings, pipeline)
+            async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:
+                response = await client.get('/api/task/' + task_id)
+            assert response.status_code == 200
+            assert response.json()['error']['code'] == 'invalid_video_part'
+        finally:
+            await jobs.stop()
+    else:
+        with pytest.raises(BilibiliInputError) as caught:
+            await pipeline.acquire_asset(task_id, url, kind=mode)
+        assert caught.value.code == 'invalid_video_part'
+    assert len(view_calls) == 1
+    assert json.loads((directory / 'source-resolution.json').read_text())['error']['code'] == 'invalid_video_part'
+    assert not (directory / 'acquisition.json').exists()

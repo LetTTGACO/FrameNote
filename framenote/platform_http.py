@@ -28,6 +28,7 @@ _MESSAGES = {
     'network_error': 'Bilibili network request failed',
     'invalid_response': 'Bilibili returned an invalid response',
     'deadline_exceeded': 'Bilibili request stage deadline exceeded',
+    'attempt_timeout': 'Bilibili request attempt timed out',
 }
 
 
@@ -216,11 +217,20 @@ class BilibiliHTTP:
                 error = _error('network_error')
                 error._retryable = True
             except BilibiliHTTPError as exc:
-                error = exc
+                error = self._attempt_error(exc, attempt_deadline)
             except ValueError:
                 error = _error('invalid_response')
             _wait_for_retry(error, attempt, deadline=self._deadline)
         raise _error('network_error')
+
+    def _attempt_error(self, error: BilibiliHTTPError, deadline: float) -> BilibiliHTTPError:
+        # The guard and body reader share an absolute attempt budget. Only an
+        # attempt bounded earlier than the stage may consume another attempt.
+        if error.code == 'deadline_exceeded' and deadline < self._deadline:
+            _remaining(self._deadline)
+            error = _error('attempt_timeout')
+            error._retryable = True
+        return error
 
     def resolve_short_url(self, url: str) -> str:
         """Expand b23 identity links without cookies or fetching video HTML."""
@@ -272,7 +282,7 @@ class BilibiliHTTP:
                     error = _error('network_error')
                     error._retryable = True
                 except BilibiliHTTPError as exc:
-                    error = exc
+                    error = self._attempt_error(exc, deadline)
                 except ValueError:
                     error = _error('unsafe_target')
                 _wait_for_retry(error, attempt, deadline=self._deadline)

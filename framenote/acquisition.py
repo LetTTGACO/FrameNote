@@ -16,6 +16,7 @@ from typing import Any, Callable, Iterator
 from urllib.parse import urlunsplit, parse_qs, urlencode, urlparse, urljoin
 import yt_dlp
 from .platform_http import BilibiliHTTPError, open_bilibili
+from .subtitles import BilibiliInputError
 _EMBEDDED_LINK_RE = re.compile(r'(?<![A-Za-z0-9_.@/-])(?:https?://)?(?:www\.|m\.|v\.|music\.)?(?:bilibili\.com|b23\.tv|douyin\.com|iesdouyin\.com|youtube\.com|youtu\.be|youtube-nocookie\.com)/\S+', re.I)
 _TRAILING_PUNCT = '.,;:!?。，；：！？、）】」』”'
 
@@ -202,6 +203,8 @@ class MediaDownloader:
             reason = self._bili_payload_reason(payload)
             raise RuntimeError(f'view 接口未返回可用数据（{reason}）')
         pages: list[dict[str, Any]] = [{'page': int(item.get('page') or index), 'cid': int(item.get('cid') or 0), 'part': str(item.get('part') or f"P{item.get('page')}"), 'duration': float(item.get('duration') or 0)} for index, item in enumerate(data.get('pages') or [], start=1) if item.get('cid')]
+        if pages and not any(page['page'] == (_page_requested(url) or 1) for page in pages):
+            raise BilibiliInputError('invalid_video_part', 'Requested Bilibili video part does not exist')
         duration = sum((page['duration'] for page in pages)) or float(data.get('duration') or 0)
         stat = data.get('stat') or {}
         owner = data.get('owner') or {}
@@ -231,8 +234,10 @@ class MediaDownloader:
         key, pages = self._bilibili_play_pages(url, cookie)
         if not pages:
             raise RuntimeError('view 接口未返回分 P 信息，无法取播放地址')
-        wanted = _page_requested(url)
-        page = next((item for item in pages if item['page'] == wanted), pages[0])
+        wanted = _page_requested(url) or 1
+        page = next((item for item in pages if item['page'] == wanted), None)
+        if page is None:
+            raise BilibiliInputError('invalid_video_part', 'Requested Bilibili video part does not exist')
         identifiers = self._bili_view_cache.get(key) or {}
         params: dict[str, Any] = {'cid': page['cid'], 'fnval': 16}
         if identifiers.get('bvid'):
@@ -350,6 +355,8 @@ class MediaDownloader:
             if kind == MediaSource.BILIBILI and self._bilibili_blocked(exc):
                 try:
                     return self._extract_bilibili_api_info(url, cookie, notes)
+                except BilibiliInputError:
+                    raise
                 except Exception as api_exc:
                     raise RuntimeError(f'B 站视频页被风控拦截（{exc}），改用开放接口直连也未成功：{api_exc}') from exc
             raise

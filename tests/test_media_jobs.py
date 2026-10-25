@@ -81,7 +81,8 @@ async def test_same_request_coalesces_and_different_operations_share_video(setup
 
 
 @pytest.mark.asyncio
-async def test_retry_inherits_completed_frames_and_only_runs_missing(setup, monkeypatch):
+@pytest.mark.parametrize('implicit', [False, True])
+async def test_retry_inherits_completed_frames_and_only_runs_missing(setup, monkeypatch, implicit):
     store, task_id, pipe, media = setup
     original = __import__('framenote.media_jobs', fromlist=['extract_frame_isolated']).extract_frame_isolated
     calls = []
@@ -97,7 +98,7 @@ async def test_retry_inherits_completed_frames_and_only_runs_missing(setup, monk
         failed = await media.get(task_id, op['operation_id'], wait=45)
         assert failed['status'] == 'failed'
         first_frame = failed['result']['frames'][0]
-        retry = media.retry(task_id, op['operation_id'])
+        retry = media.enqueue_frames(task_id, [1, 2]) if implicit else media.retry(task_id, op['operation_id'])
         assert retry['retry_of'] == op['operation_id'] and retry['operation_id'] != op['operation_id']
         done = await media.get(task_id, retry['operation_id'], wait=45)
         assert done['status'] == 'completed'
@@ -306,3 +307,40 @@ async def test_isolated_decoder_uses_service_package_outside_source_cwd(tmp_path
     assert abs(result['actual_time'] - 1.2) < .041
     assert result['timestamp_kind'] == 'decoded_frame_pts'
     assert list(output.parent.iterdir()) == [output]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('stale', [False, True])
+@pytest.mark.parametrize('status', ['failed', 'cancelled'])
+async def test_implicit_retry_chooses_descendant_and_invalidates_stale_frames(setup, monkeypatch, stale, status):
+    store, task_id, pipe, media = setup
+    original = __import__('framenote.media_jobs', fromlist=['extract_frame_isolated']).extract_frame_isolated
+    calls = []
+    async def extract(video, output, seconds, *, timeout):
+        calls.append(seconds)
+        if seconds == 2:
+            raise RuntimeError('decode failure')
+        return await original(video, output, seconds, timeout=timeout)
+    monkeypatch.setattr('framenote.media_jobs.extract_frame_isolated', extract)
+    await media.start()
+    try:
+        first = media.enqueue_frames(task_id, [1, 2])
+        failed = await media.get(task_id, first['operation_id'], wait=45)
+        child = media.retry(task_id, first['operation_id'])
+        child_failed = await media.get(task_id, child['operation_id'], wait=45)
+        if status == 'cancelled':
+            saved = media._read(task_id, child['operation_id'])
+            saved.update(status='cancelled', phase='cancelled')
+            media._save(saved)
+            child_failed = await media.get(task_id, child['operation_id'])
+        if stale:
+            (store.directory(task_id) / 'source.mp4').write_bytes(b'new media')
+        retry = media.enqueue_frames(task_id, [1, 2])
+        assert retry['retry_of'] == child['operation_id']
+        assert retry['result']['frames'] == ([] if stale else failed['result']['frames'])
+        assert media.enqueue_frames(task_id, [1, 2]) == retry
+        done = await media.get(task_id, retry['operation_id'], wait=45)
+        assert calls == ([1, 2, 2, 1, 2] if stale else [1, 2, 2, 2])
+        assert await media.get(task_id, child['operation_id']) == child_failed
+    finally:
+        await media.stop()
