@@ -13,6 +13,7 @@
 | 环境变量 | 默认值 | 含义与约束 |
 | --- | --- | --- |
 | `FRAMENOTE_WORKSPACE` | `workspace` | 数据目录；任务保存在 `tasks/` 子目录 |
+| `FRAMENOTE_BILIBILI_CREDENTIALS` | 未配置 | 服务端私有 B站凭据 JSON 路径；相对路径按服务启动目录解析 |
 | `FRAMENOTE_ASR_BACKEND` | `sensevoice` | 后端名称；内置工厂登记 `sensevoice` |
 | `FRAMENOTE_SENSEVOICE_MODEL` | `models/sensevoice` | SenseVoice 模型目录 |
 | `FRAMENOTE_VAD_MODEL` | `models/vad` | 语音活动检测（VAD）模型目录 |
@@ -57,6 +58,30 @@
 `/api/health` 返回进程活性、后端状态和 `galaxy_enabled`。其中 `asr_models_present` 表示必需模型文件存在，不表示哈希核验通过。
 
 依赖预检在启动时执行并缓存。修复或安装 Python 依赖后，重启服务。健康请求复用缓存并检查模型文件是否存在；完整哈希核验使用[模型核验命令](MODELS.md#准备并核验模型)。
+
+## B站私有凭据管理
+
+凭据只在服务端本地管理。将授权登录流程取得的 JSON 导入专用私有目录；输入支持 `SESSDATA` / `sessdata`、`bili_jct`、`buvid3`、`buvid4`、`b_nut`、`b_lsid`，其他字段会忽略，控制字符会拒绝。输入文件也应妥善保管。
+
+```bash
+python -m framenote.credentials import --input /private/login.json --file /private/framenote/bilibili.json
+python -m framenote.credentials status --file /private/framenote/bilibili.json
+python -m framenote.credentials clear --file /private/framenote/bilibili.json
+```
+
+将示例路径换成服务用户可用的实际路径，在与服务相同的 `FRAMENOTE_WORKSPACE` 环境下运行。导入以原子替换写入 `0600` 文件，新建专用管理目录为 `0700`；已有父目录必须已是当前用户所有的 `0700` 目录，命令不会替共享目录修改权限。凭据路径须位于 `workspace/tasks/` 之外，不能经过符号链接；读取时拒绝组或其他用户可访问的文件。
+
+`status` 仅返回 `configured`、`usable` 和各字段是否存在。`usable` 表示本地格式检查通过，不代表在线登录仍有效。`clear` 只删除指定凭据文件，保留目录与其他文件。缺失或失效凭据按匿名访问和后续获取回退处理，缺少凭据不会阻止服务启动。
+
+在服务环境中配置路径：
+
+```text
+FRAMENOTE_BILIBILI_CREDENTIALS=/private/framenote/bilibili.json
+```
+
+修改配置路径后需重新加载服务环境。获取操作按路径读取凭据文件，原子导入更新文件后，下次读取即可使用新内容。凭据值不进入命令行参数、HTTP/MCP 参数、任务材料或日志。
+
+账号 Cookie 仅发送给 `api.bilibili.com`、`www.bilibili.com`、`bilibili.com`、`passport.bilibili.com`，CDN 请求不带账号 Cookie。受控请求仅允许 HTTPS 的 `hdslb.com`、`bilibili.com`、`bilivideo.com`、`bilivideo.cn` 及其子域，每次重定向重新验证目标和 Cookie 范围，最多跟随 5 跳。请求适配器对临时网络错误最多尝试 3 次，单次最多 20 秒，退避 1 / 2 秒，并遵守阶段总截止时间和 `Retry-After`；认证失效直接分类，供获取流程回退。
 
 ## Galaxy 获取配置
 

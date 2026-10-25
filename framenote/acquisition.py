@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 from urllib.parse import urlunsplit, parse_qs, urlencode, urlparse, urljoin
 import yt_dlp
+from .platform_http import BilibiliHTTPError, open_bilibili
 _EMBEDDED_LINK_RE = re.compile(r'(?<![A-Za-z0-9_.@/-])(?:https?://)?(?:www\.|m\.|v\.|music\.)?(?:bilibili\.com|b23\.tv|douyin\.com|iesdouyin\.com|youtube\.com|youtu\.be|youtube-nocookie\.com)/\S+', re.I)
 _TRAILING_PUNCT = '.,;:!?。，；：！？、）】」』”'
 
@@ -79,32 +80,38 @@ class MediaDownloader:
 
     @staticmethod
     def _bili_request_error(exc: Exception) -> str:
-        """把"压根没拿到 B 站 JSON"这件事翻译成能指认真凶的一句。
-
-        以前这里吞成空字典，用户只看到 code=None——412 风控、超时、DNS 失败、代理被
-        重置长得一模一样，群里报障只能来回问三轮。
-        """
+        """Public errors retain classification, never upstream authentication data."""
+        if isinstance(exc, BilibiliHTTPError):
+            return str(exc)
         if isinstance(exc, urllib.error.HTTPError):
-            return f'HTTP {exc.code} {exc.reason}'
-        if isinstance(exc, urllib.error.URLError):
-            return f'连接失败（{exc.reason}）'
+            return f'HTTP {exc.code}：B站请求失败'
+        if isinstance(exc, (urllib.error.URLError, OSError)):
+            return 'B站连接失败'
         if isinstance(exc, (json.JSONDecodeError, UnicodeDecodeError)):
-            return f'响应不是可解析的 JSON（{type(exc).__name__}）'
-        return f'{type(exc).__name__}: {exc}'[:160]
+            return '响应不是可解析的 JSON'
+        return 'B站请求失败'
 
     @staticmethod
     def _bili_payload_reason(payload: dict[str, Any]) -> str:
-        """回退通道失败时的成因：优先传输层错误，其次 B 站自己给的 code/message。"""
-        error = str(payload.get('error') or '')
-        if error:
+        """Use only fixed public classifications for upstream failures."""
+        error = payload.get('error')
+        safe_errors = {'B站连接失败', '响应不是可解析的 JSON', 'B站请求失败',
+                       'Bilibili request target is not permitted',
+                       'Bilibili authentication is required or expired',
+                       'Bilibili request was blocked by risk control',
+                       'Bilibili network request failed', 'Bilibili returned an invalid response',
+                       'Bilibili request stage deadline exceeded'}
+        if isinstance(error, str) and (error in safe_errors or re.fullmatch(r'HTTP [0-9]{3}：B站请求失败', error)):
             return error
-        message = str(payload.get('message') or '')
-        return f"code={payload.get('code')}{(f' {message}' if message else '')}"
+        code = payload.get('code')
+        if type(code) is int:
+            return f'code={code}：B站接口请求失败'
+        return 'B站接口请求失败'
 
     @staticmethod
     def _bilibili_get_json(url: str, params: dict[str, Any], headers: dict[str, str]) -> dict[str, Any]:
         try:
-            with urllib.request.urlopen(urllib.request.Request(f'{url}?{urlencode(params)}', headers=headers), timeout=20) as response:
+            with open_bilibili(urllib.request.Request(f'{url}?{urlencode(params)}', headers=headers), timeout=20) as response:
                 raw = response.read()
         except Exception as exc:
             return {'error': MediaDownloader._bili_request_error(exc)}
@@ -116,7 +123,7 @@ class MediaDownloader:
             return data
         try:
             signed = MediaDownloader._wbi_sign(params)
-            with urllib.request.urlopen(urllib.request.Request(f'{url}?{urlencode(signed)}', headers=headers), timeout=20) as response:
+            with open_bilibili(urllib.request.Request(f'{url}?{urlencode(signed)}', headers=headers), timeout=20) as response:
                 return json.loads(response.read().decode('utf-8'))
         except Exception:
             return data
@@ -248,7 +255,7 @@ class MediaDownloader:
         candidates.extend((str(item.get('url') or '') for item in data.get('durl') or []))
         urls = [value for value in candidates if value.startswith('http')]
         if not urls:
-            raise RuntimeError(f"playurl 接口未返回可下载流（code={payload.get('code')}，msg={payload.get('message') or '无'}）")
+            raise RuntimeError(f"playurl 接口未返回可下载流（{self._bili_payload_reason(payload)}）")
         if notes is not None:
             notes.append('yt-dlp 下载被 B 站风控拦截，已改用 playurl 接口直连' + ('音频流' if kind == 'audio' else '预览视频流') + f"（分 P {page['page']}）")
         last_error: Exception | None = None
@@ -430,7 +437,8 @@ class MediaDownloader:
         target.parent.mkdir(parents=True, exist_ok=True)
         partial = target.with_name(target.name + '.part')
         try:
-            with urllib.request.urlopen(request, timeout=60) as response, partial.open('wb') as output:
+            opener = open_bilibili if user_agent is not None else urllib.request.urlopen
+            with opener(request, timeout=60) as response, partial.open('wb') as output:
                 while (chunk := response.read(1024 * 1024)):
                     if should_abort is not None and should_abort():
                         raise asyncio.CancelledError('任务已取消')
@@ -439,6 +447,12 @@ class MediaDownloader:
                 raise RuntimeError('媒体直连下载结果为空')
             partial.replace(target)
             return target
+        except BilibiliHTTPError:
+            raise
+        except Exception as exc:
+            if user_agent is not None:
+                raise RuntimeError(self._bili_request_error(exc)) from None
+            raise
         finally:
             partial.unlink(missing_ok=True)
 

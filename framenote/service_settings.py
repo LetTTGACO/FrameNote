@@ -42,9 +42,12 @@ class Settings:
     galaxy_base_url: str = "https://downloader-api.bhwa233.com"
     max_upload_bytes: int = 2147483648
     process_timeout: float = 7200
+    bilibili_credentials: Path | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "workspace", self.workspace.expanduser().resolve())
+        if self.bilibili_credentials is not None:
+            object.__setattr__(self, "bilibili_credentials", Path(os.path.abspath(self.bilibili_credentials.expanduser())))
         if self.asr_backend != "sensevoice":
             raise ValueError("Unknown ASR backend: " + self.asr_backend)
         if type(self.max_upload_bytes) is not int:
@@ -66,6 +69,8 @@ class Settings:
         timeout = float(values.get("FRAMENOTE_PROCESS_TIMEOUT", "7200"))
         return cls(
             workspace=path("FRAMENOTE_WORKSPACE", "workspace"),
+            bilibili_credentials=(base / Path(values["FRAMENOTE_BILIBILI_CREDENTIALS"]).expanduser()
+                                  if values.get("FRAMENOTE_BILIBILI_CREDENTIALS") else None),
             sensevoice=SenseVoiceConfig(path("FRAMENOTE_SENSEVOICE_MODEL", "models/sensevoice"),
                                        path("FRAMENOTE_VAD_MODEL", "models/vad"), python,
                                        int(values.get("FRAMENOTE_ASR_THREADS", "4")), timeout),

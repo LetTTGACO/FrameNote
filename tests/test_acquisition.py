@@ -296,14 +296,14 @@ def test_download_direct_media_aborts_when_cancel_requested(tmp_path: Path, monk
 
         def __exit__(self, *_args):
             return False
-    monkeypatch.setattr('framenote.acquisition.urllib.request.urlopen', lambda *a, **k: FakeResponse())
+    monkeypatch.setattr('framenote.acquisition.open_bilibili', lambda *a, **k: FakeResponse())
     state = {'called': 0}
 
     def should_abort():
         state['called'] += 1
         return state['called'] > 1
     with pytest.raises(asyncio.CancelledError):
-        processor._download_direct_media('https://cdn.test/audio.m4a', target, 'https://www.bilibili.com/', None, user_agent=MediaDownloader.BILI_USER_AGENT, should_abort=should_abort)
+        processor._download_direct_media('https://cn.bilivideo.com/audio.m4a', target, 'https://www.bilibili.com/', None, user_agent=MediaDownloader.BILI_USER_AGENT, should_abort=should_abort)
     assert not target.exists()
     assert not list(target.parent.glob('*.part'))
 
@@ -314,17 +314,17 @@ def test_cookie_header_includes_risk_control_cookies() -> None:
 def test_view_api_keeps_the_reason_a_request_died(tmp_path: Path) -> None:
     """回退通道失败必须说清是怎么死的：以前 412、超时、DNS 失败全被吞成 code=None。"""
     processor = MediaDownloader(tmp_path)
-    for exc, expected in ((urllib.error.HTTPError(_BILI_URL, 412, 'Precondition Failed', None, None), 'HTTP 412 Precondition Failed'), (urllib.error.URLError('Name or service not known'), '连接失败（Name or service not known）')):
+    for exc, expected in ((urllib.error.HTTPError(_BILI_URL, 412, 'Precondition Failed', None, None), 'HTTP 412：B站请求失败'), (urllib.error.URLError('Name or service not known'), 'B站连接失败')):
         reason = processor._bili_request_error(exc)
         assert reason == expected
         message = processor._bili_payload_reason({'error': reason})
-        assert message == expected
+        assert 'Precondition Failed' not in message and 'Name or service not known' not in message
 
 def test_bilibili_get_json_returns_reason_and_skips_pointless_resign(monkeypatch: pytest.MonkeyPatch) -> None:
     """传输层就没通时不再补一次 wbi 签名重试（超时场景能少等 20 秒）。"""
     calls = _fail_urlopen(monkeypatch, urllib.error.HTTPError(_BILI_URL, 412, 'Precondition Failed', None, None))
     payload = MediaDownloader._bilibili_get_json('https://api.bilibili.com/x/web-interface/view', {'bvid': 'BV1xM4y1z7Kt'}, {})
-    assert payload == {'error': 'HTTP 412 Precondition Failed'}
+    assert payload == {'error': 'HTTP 412：B站请求失败'}
     assert len(calls) == 1
 
 def test_bilibili_get_json_says_so_when_the_body_is_not_json(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -340,19 +340,19 @@ def test_bilibili_get_json_says_so_when_the_body_is_not_json(monkeypatch: pytest
 
         def __exit__(self, *args):
             return False
-    monkeypatch.setattr('framenote.acquisition.urllib.request.urlopen', lambda request, timeout=None: FakeResponse())
+    monkeypatch.setattr('framenote.acquisition.open_bilibili', lambda request, timeout=None: FakeResponse())
     payload = MediaDownloader._bilibili_get_json('https://api.bilibili.com/x', {}, {})
-    assert payload == {'error': '响应不是可解析的 JSON（JSONDecodeError）'}
+    assert payload == {'error': '响应不是可解析的 JSON'}
 
 def test_fallback_message_names_the_real_cause(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """截图上那种「code=None」以后要么写成因，要么写 B 站给的 message。"""
+    """回退失败保留固定错误分类和数值状态，不回显上游 message。"""
     processor = MediaDownloader(tmp_path)
-    monkeypatch.setattr(processor, '_bilibili_get_json', lambda url, params, headers: {'error': 'HTTP 412 Precondition Failed'})
-    with pytest.raises(RuntimeError, match='HTTP 412 Precondition Failed') as blocked:
+    monkeypatch.setattr(processor, '_bilibili_get_json', lambda url, params, headers: {'error': 'Bilibili request was blocked by risk control'})
+    with pytest.raises(RuntimeError, match='blocked by risk control') as blocked:
         processor._extract_bilibili_api_info(_BILI_URL, {'sessdata': 's'})
     assert 'code=None' not in str(blocked.value)
     monkeypatch.setattr(processor, '_bilibili_get_json', lambda url, params, headers: {'code': -400, 'message': '请求错误', 'data': None})
-    with pytest.raises(RuntimeError, match='请求错误') as bad_id:
+    with pytest.raises(RuntimeError, match='B站接口请求失败') as bad_id:
         processor._extract_bilibili_api_info(_BILI_URL, {'sessdata': 's'})
     assert 'code=-400' in str(bad_id.value)
 
@@ -398,7 +398,7 @@ def _fail_urlopen(monkeypatch: pytest.MonkeyPatch, exc: Exception) -> list[str]:
     def fake_urlopen(request, timeout=None):
         calls.append(request.full_url)
         raise exc
-    monkeypatch.setattr('framenote.acquisition.urllib.request.urlopen', fake_urlopen)
+    monkeypatch.setattr('framenote.acquisition.open_bilibili', fake_urlopen)
     return calls
 
 
@@ -423,3 +423,53 @@ def test_short_link_resolves_page_before_video_and_audio_selection(tmp_path, mon
     for kind in ("video", "audio"):
         processor._download_bilibili_media_via_api(normalized, tmp_path / kind, None, kind)
     assert cids == [100 + expected, 100 + expected]
+
+
+def test_legacy_bilibili_direct_download_strips_cookie_from_cdn(tmp_path, monkeypatch):
+    import io
+    from email.message import Message
+    requests = []
+    class FakeOpener:
+        def open(self, request, data=None, timeout=None):
+            requests.append(request)
+            if len(requests) == 1:
+                headers = Message()
+                headers['Location'] = 'https://i0.hdslb.com/media'
+                raise urllib.error.HTTPError(request.full_url, 302, 'redirect', headers, None)
+            return io.BytesIO(b'media')
+    monkeypatch.setattr('framenote.platform_http.urllib.request.build_opener', lambda *args: FakeOpener())
+    monkeypatch.setattr('urllib.request._opener', None)
+    target = tmp_path / 'media.m4a'
+    MediaDownloader(tmp_path)._download_direct_media('https://api.bilibili.com/media', target, _BILI_URL, {'sessdata': 'secret'}, user_agent=MediaDownloader.BILI_USER_AGENT)
+    assert target.read_bytes() == b'media'
+    assert requests[0].get_header('Cookie') == 'SESSDATA=secret'
+    assert requests[1].get_header('Cookie') is None
+
+
+def test_legacy_bilibili_api_errors_never_echo_authentication(monkeypatch):
+    class FakeOpener:
+        def open(self, request, data=None, timeout=None):
+            raise urllib.error.HTTPError(request.full_url, 403, 'SESSDATA=secret', None, None)
+    monkeypatch.setattr('framenote.platform_http.urllib.request.build_opener', lambda *args: FakeOpener())
+    monkeypatch.setattr('urllib.request._opener', None)
+    payload = MediaDownloader._bilibili_get_json('https://api.bilibili.com/x', {}, {'Cookie': 'SESSDATA=secret'})
+    assert payload.get('error')
+    assert 'secret' not in json.dumps(payload)
+    assert 'secret' not in MediaDownloader._bili_payload_reason({'code': -101, 'message': 'SESSDATA=secret'})
+
+
+def test_legacy_bilibili_media_body_failure_is_redacted_and_partial_is_cleaned(tmp_path, monkeypatch):
+    from framenote.platform_http import BilibiliHTTPError
+    class BrokenResponse:
+        def read(self, size):
+            raise urllib.error.URLError('SESSDATA=secret')
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+    monkeypatch.setattr('framenote.acquisition.open_bilibili', lambda *args, **kwargs: BrokenResponse())
+    target = tmp_path / 'audio.m4a'
+    with pytest.raises((RuntimeError, BilibiliHTTPError)) as error:
+        MediaDownloader(tmp_path)._download_direct_media('https://cn.bilivideo.com/audio', target, _BILI_URL, {'sessdata': 'secret'}, user_agent=MediaDownloader.BILI_USER_AGENT)
+    assert 'secret' not in str(error.value)
+    assert not target.exists() and not target.with_name('audio.m4a.part').exists()
