@@ -47,7 +47,9 @@ def resolve_media_source(root: Path, task_id: str, url: str) -> tuple[str, Bilib
         identity: BilibiliIdentity | None
         try:
             identity = BilibiliClient(http).resolve(target)
-        except BilibiliHTTPError:
+        except BilibiliHTTPError as error:
+            if error.code == "unsafe_target":
+                raise
             # Metadata outages do not disable safe legacy media acquisition.
             identity = BilibiliIdentity(**expected) if expected else None
         if expected and identity and any(expected.get(key) != getattr(identity, key) for key in ("bvid", "aid", "page", "cid")):

@@ -754,3 +754,51 @@ async def test_retained_audio_is_preferred_over_silent_source_hint(media_pipelin
     assert any(stream['codec_type'] == 'audio' for stream in (await probe_media(output))['streams'])
     assert calls == ['video']
     assert json.loads((directory / 'media.json').read_text())['source_has_audio'] is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('mode', ['full', 'video', 'audio'])
+async def test_unsafe_identity_resolution_after_safe_expansion_never_uses_legacy_or_galaxy(subtitle_pipeline, monkeypatch, mode):
+    from dataclasses import replace
+    from framenote import service_acquire
+    from framenote.platform_http import BilibiliHTTPError
+    from framenote.subtitles import BilibiliInputError
+    pipeline, store, task_id, directory, identity, outcome, calls = subtitle_pipeline
+    pipeline.settings = replace(pipeline.settings, galaxy_enabled=True)
+    monkeypatch.delattr(pipeline, 'acquire_upstream')
+    attempts = []
+    def expanded(self, url):
+        attempts.append('safe_expansion')
+        return identity.canonical_url
+    def unsafe(self, url):
+        assert attempts == ['safe_expansion']
+        attempts.append('identity_resolution')
+        raise BilibiliHTTPError('unsafe_target', 'blocked')
+    async def legacy(*args, **kwargs):
+        attempts.append('legacy')
+        raise RuntimeError('Legacy media unavailable')
+    async def galaxy(*args, **kwargs):
+        attempts.append('galaxy')
+        raise RuntimeError('Galaxy must not run after unsafe identity resolution')
+    async def worker(args, **kwargs):
+        try:
+            await service_acquire.acquire(store.root, task_id, args[args.index('--url') + 1], mode=mode)
+        except BilibiliInputError:
+            # The real subprocess reports a nonzero exit; the public marker
+            # must preserve the typed input error across that boundary.
+            raise RuntimeError('Worker failed') from None
+    monkeypatch.setattr(service_acquire, 'load_credentials', lambda *args, **kwargs: (None, 'missing'))
+    monkeypatch.setattr(service_acquire.BilibiliHTTP, 'resolve_short_url', expanded)
+    monkeypatch.setattr(service_acquire.BilibiliClient, 'resolve', unsafe)
+    monkeypatch.setattr(service_acquire.MediaDownloader, 'get_video_info', legacy)
+    monkeypatch.setattr('framenote.service_pipeline.run_process', worker)
+    for method in ('download', 'download_video', 'download_audio'):
+        monkeypatch.setattr('framenote.galaxy_downloader.GalaxyDownloader.' + method, galaxy)
+    with pytest.raises(BilibiliInputError) as caught:
+        if mode == 'full':
+            await pipeline.acquire(task_id, lambda: False)
+        else:
+            await pipeline.acquire_asset(task_id, store.get(task_id)['video_url'], kind=mode)
+    assert caught.value.code == 'invalid_video_url'
+    assert attempts == ['safe_expansion', 'identity_resolution']
+    assert json.loads((directory / 'source-resolution.json').read_text())['error']['code'] == 'invalid_video_url'

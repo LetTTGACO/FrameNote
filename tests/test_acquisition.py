@@ -610,7 +610,8 @@ async def test_video_only_worker_never_downloads_audio(tmp_path, monkeypatch, vi
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize('mode', ['full', 'video', 'audio'])
-async def test_media_workers_reject_unsafe_identity_redirect_before_legacy(tmp_path, monkeypatch, mode):
+@pytest.mark.parametrize('stage', ['short_expansion', 'identity_resolution'])
+async def test_media_workers_reject_unsafe_identity_redirect_before_legacy(tmp_path, monkeypatch, mode, stage):
     import threading
     from framenote import service_acquire
     from framenote.platform_http import BilibiliHTTPError
@@ -620,7 +621,12 @@ async def test_media_workers_reject_unsafe_identity_redirect_before_legacy(tmp_p
         raise BilibiliHTTPError('unsafe_target', 'blocked')
     def forbidden(*args, **kwargs):
         pytest.fail('Unsafe identity may not enter legacy acquisition')
-    monkeypatch.setattr(service_acquire.BilibiliHTTP, 'resolve_short_url', unsafe)
+    monkeypatch.setattr(service_acquire, 'load_credentials', lambda *args, **kwargs: (None, 'missing'))
+    if stage == 'short_expansion':
+        monkeypatch.setattr(service_acquire.BilibiliHTTP, 'resolve_short_url', unsafe)
+    else:
+        monkeypatch.setattr(service_acquire.BilibiliHTTP, 'resolve_short_url', lambda self, url: _BILI_URL)
+        monkeypatch.setattr(service_acquire.BilibiliClient, 'resolve', unsafe)
     monkeypatch.setattr(MediaDownloader, '_resolve_bili_short_url', forbidden)
     monkeypatch.setattr(MediaDownloader, 'get_video_info', forbidden)
     with pytest.raises(BilibiliInputError) as caught:
