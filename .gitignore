@@ -14,3 +14,4 @@ service.env
 .framenote.json
 .codex/config.toml
 .DS_Store
+/docs/operations/

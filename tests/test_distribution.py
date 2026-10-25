@@ -34,7 +34,7 @@ def assert_private_files_excluded(names):
         path = Path(name)
         assert not any(part in {".local", ".superpowers", ".runtime", "workspace", "models", ".codex"}
                        for part in path.parts), name
-        assert not name.startswith("docs/superpowers/"), name
+        assert not name.startswith(("docs/superpowers/", "docs/operations/")), name
         assert path.name not in {"service.env", ".framenote.json", "cookies.json", "bilibili.json"}, name
         assert not path.name.endswith((".cookie", ".cookies")), name
 
@@ -119,3 +119,19 @@ def test_sdist_rebuild_preserves_embedded_identity_without_git(distributions, tm
              "--wheel-dir", str(output), str(source)], cwd=tmp_path)
     with zipfile.ZipFile(next(output.glob("*.whl"))) as archive:
         assert json.loads(archive.read("framenote/_build_info.json")) == build_info()
+
+
+def test_sdist_excludes_private_operations_created_in_a_checkout(distributions, tmp_path):
+    _, source = distributions
+    # This archive was built from the repository by this test session.
+    with tarfile.open(source) as archive:
+        archive.extractall(tmp_path, **({"filter": "data"} if hasattr(tarfile, "data_filter") else {}))
+    root = tmp_path / source.name.removesuffix(".tar.gz")
+    private = root / "docs/operations/deployment-private.md"
+    private.parent.mkdir(parents=True)
+    private.write_text("Private deployment record: packaging exclusion canary.\n")
+    output = tmp_path / "rebuilt-source"
+    checked([sys.executable, "-m", "build", "--sdist", "--no-isolation", "--outdir", str(output)], cwd=root)
+    with tarfile.open(next(output.glob("*.tar.gz"))) as archive:
+        names = [name.partition("/")[2] for name in archive.getnames() if "/" in name]
+        assert_private_files_excluded(names)

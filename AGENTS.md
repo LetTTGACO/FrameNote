@@ -20,6 +20,18 @@ The repository separates runtime code, the client workflow, and operations:
 - `docs/` describes contracts and operations; `deploy/` contains environment and
   systemd templates. Generated media and notes belong in ignored `workspace/`.
 
+## Find private operations records
+
+For deployment history, instance paths, or an instance rollback, run
+`git config --path --get framenote.privateDocsPath` and read the configured
+repository's `README.md`. The local setting is shared by linked worktrees;
+keep the private repository at its configured fixed location.
+
+Commit instance records in that separate repository. Keep reusable procedures
+in this repository's `docs/`. Private records must stay outside parent commits
+and distribution archives; credentials and data backups remain in private
+server storage.
+
 ## Set up a development environment
 
 Install Python 3.10–3.12, `ffmpeg`, `ffprobe`, `curl`, and `libsndfile` before
@@ -49,7 +61,7 @@ starting. From the repository root, complete these steps:
    python -m pytest -q
    ```
 
-   The two optional distribution tests are skipped unless explicitly enabled.
+   The optional distribution tests are skipped unless explicitly enabled.
 
 For real inference, also install `'.[asr]'`, prepare and verify the models, and
 load the service configuration as described in the
@@ -113,7 +125,7 @@ checks as follows:
      python -m pytest tests/test_distribution.py -q
    ```
 
-   Confirm that both tests pass. They check archive contents and installation
+   Confirm that all tests pass. They check archive contents and installation
    outside the source directory.
 
 CI runs checks on Python 3.10 and 3.12; Python 3.12 also runs the distribution
