@@ -1,14 +1,79 @@
-# 原生部署与阅读验收记录：2026-10-20
+# 原生部署与阅读验收记录
+
+## 2026-10-25：字幕优先与按需媒体
+
+本次针对字幕优先分支的新代码，使用本地隔离候选服务（loopback `18122`、单 worker、独立 workspace）验证。未部署、未替换正式服务、未推送；下方 2026-10-20 的两机历史证据不计为本功能的新代码验收。运行代码基于 `ff5b5ac`；本次只修改发行检查与公开文档。
+
+### 环境与离线验证
+
+| 项目 | 本次实际结果 |
+| --- | --- |
+| 本机 | macOS 26.7.1（25G241），Apple Silicon arm64 |
+| 原生运行环境 | Python 3.12.13，隔离 editable 环境，真实 SenseVoice ONNX；模型按固定清单 10/10 核验 |
+| 最低版本兼容 | 同机独立 Python 3.10.20；属于离线行为回归，不代表 N100 原生推理 |
+| Python 3.12 完整 pytest | `541 passed, 2 skipped, 1 warning in 44.78s` |
+| Python 3.10 完整 pytest | `541 passed, 2 skipped, 1 warning in 61.59s` |
+| mypy | `Success: no issues found in 25 source files` |
+| 启用发行检查 | `2 passed in 29.77s`；独立构建 wheel/sdist、离线安装至新虚拟环境，在源码目录外执行 |
+| 发行内容 | 六个新增运行模块、模型锁、LICENSE/NOTICE 齐全；私有目录、配置、凭据和任务/模型数据排除；MCP 12 工具，`credentials --help` 不加载推理库 |
+| 构建 | wheel/sdist 构建成功；最终归档哈希记录在本次本地交付报告中 |
+
+完整测试的 2 项 SKIP 是默认关闭的发行检查，不能计为通过；上表单独启用的 `2 passed` 才是发行证据。两套完整测试都保留一条既有 Starlette TestClient 弃用警告。首次启用旧发行测试实际失败于 `12 != 9`，更新后的断言再通过；归档缺模块与混入私有文件的负向探针另行执行。未执行云端 CI；现有 CI 保持 Ubuntu Python 3.10/3.12，3.12 单独启用发行测试。
+
+### 真实本地推理与重启复读
+
+先前同分支 `480e697` 的本地 20.000 秒 h264+aac 上传任务 `b60b0426a0e14b48a41742b8c90e11de` 已实际完成：SenseVoice ASR 1.621 秒、模型加载 0.881 秒、1 段 `VAD_interval`。本次比对 service、pipeline、acquire、media_jobs、frame_extractor 五个核心文件，SHA-256 全部与该次推理证据相同，复用该推理证据。
+
+本次启动最新代码后 `/api/ready=200`，`configured/available=true`；通过真实 `/mcp` 读取到 12 个工具。回读旧任务，并重复请求相同帧点与视频，仍返回已完成的原操作：
+
+- 截图 operation `b8f96296926844fbac14e095b4f39d14`，请求 1.0 / 5.123 秒，实际 PTS 为 1.0 / 5.133333 秒。
+- 有声视频 operation `8513d5c7b4fe405788efda9266d4b1af`，原下载 8,476,849 字节，ffprobe 为 20.000 秒且含 h264 视频和 aac 音频。
+- 重启及读取后 `transcript.json` SHA-256 仍为 `72a0d898bfd6d9db3c6112265a46ad60763b14032b6ef6b0629ae675c3e34432`，`asr.raw.json` 仍为 `9e503cea656e0307f0bbb0c8125931a656d49f8ac91d43c7f4efe198699a2f17`。
+
+### 真实匿名 B站回退
+
+关闭 Galaxy、清除凭据环境变量后提交 [BV1Qwby6DEu1，第 1 P](https://www.bilibili.com/video/BV1Qwby6DEu1?p=1)。本次解析身份为 `aid=117100001691581 / cid=40943289185 / page=1`，平台时长 204 秒。字幕接口实际返回需要登录，任务记录 `fallback_reason=auth_required`，随后从平台获取媒体并实际运行 ASR；这不构成 `no_tracks` 证据。
+
+| 项目 | 本次实际结果 |
+| --- | --- |
+| task_id | `84ad81f234e04d1db2966b80930bf813`，completed |
+| 转录 | 26 段，`VAD_interval`，ASR schema v2；四页（每页 7 段）拼接等于完整 segments |
+| 准备 / ASR / 总计 | 2.202 / 4.404 / 6.734 秒；提交至轮询终态墙钟 8.055 秒 |
+| 获取路径 | upstream；yt-dlp 受平台风控后改用 playurl 视频流与音频流；Galaxy 关闭 |
+| 截图 operation | `308bb83c23dd4b8798f1f68fb7e6fa61`，请求 1.0 / 5.123 秒，实际 PTS 1.005250 / 5.126875 秒 |
+| 视频 operation | `b08012e8472242bfb28a8cfe623b1bdf`，completed |
+| 有声视频 | 6,727,179 字节；203.265813 秒，h264 视频 + aac 音频 |
+| 下载 SHA-256 | `676886d8cc8cd15082f32ae81a2eb76a38748df92ecef3dbb6f70a384ae262c6` |
+| transcript.json SHA-256 | `8163e0a64ef76264a871ccd192beb5dad2c9af991d55a7e131ccf6e9653704c8` |
+| asr.raw.json SHA-256 | `d74a96d85ec8667eb50b9e648788754313db922a2d6f0a46cee4720d87c3d7e0` |
+
+截图和视频准备后两份原件哈希不变。该任务经过 ASR 获取路径，已有媒体可复用；不能据此声称已验证“字幕任务首次按需下载且视频只下载一次”。
+
+### 合成无效 Cookie
+
+在专用临时私有目录创建固定测试值，通过 `framenote.credentials import` 导入：父目录 0700、文件 0600，`status` 返回 `configured=true / usable=true`，仅说明本地格式合法。新隔离实例使用该路径后，真实字幕接口返回 `auth_required`，任务 `686d898a42b746cc96af0b2d7aeabdd4` 自动回退并完成 26 段 ASR，准备 / ASR / 总计为 2.087 / 4.105 / 6.303 秒。逐文件检查任务材料和日志未出现合成值。
+
+这是合成无效 Cookie 的路径与回退验证，没有使用真实账号，也不代表真实登录过期验收。两个本次拥有的候选进程均正常 SIGTERM 停止，测试凭据和输入已用本地 clear 及文件清理回收；未接触其他凭据。
+
+### 待完成的真实验收
+
+本次没有取得新授权的有效登录文件，以下检查仍待完成：有效字幕阳性任务（无提前下载媒体和 ASR 原件、分页与原始字幕哈希）、本次认证响应确认的 `no_tracks`、真实登录失效副本、字幕任务后续截图与有声视频及仅下载一次、force-ASR 新任务保留旧字幕目录。历史字幕段数和候选视频只作线索，不作为通过证据。
+
+N100 Ubuntu x86_64 / Python 3.10 的新代码原生验证也未执行：当前授权排除部署和远端启动/替换。2026-10-20 的旧代码 N100 验收与本机 Python 3.10 行为测试分别记录，不能替代该项。
+
+完整本地证据保存在隔离验收工作区的 `native-probes/`（`local-native-smoke.json`、`final-restart-cache.json`、`anonymous-asr-smoke.json`、`anonymous-media-smoke.json`、`synthetic-credential-management.json`、`synthetic-invalid-smoke.json`）及交付报告。公开记录只保留脱敏事实，不提交媒体、凭据或本地验收目录。
+
+## 2026-10-20：历史版本验收
 
 本记录供维护者复核 FrameNote 0.1.0 在 Ubuntu N100 和 Apple Silicon Mac 上的安装、推理、任务生命周期及笔记阅读结果。初验和最终复验分别绑定 wheel 哈希与代码提交；其中的 MCP 调用和测试数量描述对应版本的历史行为。部署操作见[部署指南](DEPLOYMENT.md)。
 
-## 验收范围
+### 验收范围
 
 两台机器使用同一个 wheel，分别在新目录创建单一虚拟环境、安装 `[asr]`、独立下载模型，并在源码目录外运行服务。候选服务使用端口 `18122`，数据与模型目录独立。
 
 原有 `18121` 生产服务在验收期间持续运行。验收结束时，其健康检查返回 `200`，`MainPID` 未变化。
 
-## 安装与模型
+### 安装与模型
 
 初验环境及检查结果如下：
 
@@ -34,7 +99,7 @@
 
 任务 `provenance` 保存全部 10 个资产哈希、模型清单指纹、参数和实际软件版本。两台机器均独立安装环境和模型，未复制旧实验的虚拟环境或权重。
 
-## 真实输入与推理
+### 真实输入与推理
 
 初验的四个任务均成功完成，识别段非空，包含合法的 `start`、`end` 和 `text`，时间来源为 `VAD_interval`。各项耗时以秒计，包含模型加载，仅用于记录这次运行：
 
@@ -49,7 +114,7 @@ B站输入为[“线性代数的几何”，第 3 P](https://www.bilibili.com/vi
 
 抖音输入为[AI 视频教程](https://v.douyin.com/NCPT3XKVZMs/)，任务的 `acquisition_provider=galaxy_api`，在该版本中触发配置允许的 Galaxy 回退。B站使用 `upstream`，本地输入使用 `upload`；上传的视频保留在任务目录。
 
-## 生命周期与兼容
+### 生命周期与兼容
 
 生命周期检查只操作候选 unit，使用真实长音视频作为运行任务、本地短视频作为排队任务。检查结果如下：
 
@@ -67,7 +132,7 @@ B站输入为[“线性代数的几何”，第 3 P](https://www.bilibili.com/vi
 
 验收脚本另有两项修正：B站 `preview.mp4` 只有视频流，因此生命周期输入改为将已有音视频无重编码合并后的文件；Ubuntu systemd 249 使用 `--kill-who=all`。读取旧材料时，缺少 `schema_version` 的材料按 v1 契约处理。这些脚本修正未改变生产环境。
 
-## 新视频笔记与阅读
+### 新视频笔记与阅读
 
 验收从源码归档提取 Skill 和标准库客户端，用客户端获取材料，并通过 MCP 分页读取全部 173 段。阅读输出保存在以下本地目录：
 
@@ -92,7 +157,7 @@ workspace/notes/2026-10-20-mit-geometry-native-4f5529/
 
 用户于 2026-10-20 确认：**“通过，阅读体验符合预期”**。这项人工阅读结果独立于自动文件检查记录。
 
-## 回归与证据
+### 回归与证据
 
 验收结束时记录的检查结果如下：
 
@@ -113,7 +178,7 @@ workspace/notes/2026-10-20-mit-geometry-native-4f5529/
 
 任务原始文件保存在各自候选 workspace，阅读稿保存在[新视频笔记与阅读](#新视频笔记与阅读)所列目录。这些目录由 Git 忽略，公开记录仅保留验收事实，不包含环境凭据或用户媒体文件。
 
-## 独立审查后的最终复验
+### 独立审查后的最终复验
 
 一次全新上下文的整分支审查提出 3 项 Important 问题，Critical 和 Minor 均为 0。复现后完成以下修复：
 

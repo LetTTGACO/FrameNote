@@ -19,12 +19,14 @@
 | `FRAMENOTE_VAD_MODEL` | `models/vad` | 语音活动检测（VAD）模型目录 |
 | `FRAMENOTE_ASR_PYTHON` | `sys.executable` | 执行推理的 Python；默认使用服务的虚拟环境 |
 | `FRAMENOTE_ASR_THREADS` | `4` | 推理线程数，须为正整数 |
-| `FRAMENOTE_PROCESS_TIMEOUT` | `7200` | 受控进程的超时秒数，也用于 ASR 推理；须为有限正数 |
+| `FRAMENOTE_PROCESS_TIMEOUT` | `7200` | 各受控阶段的超时秒数：字幕发现/正文共享该阶段 deadline，媒体进程、音频处理、封装、抽帧和 ASR 分别受限；不是整个任务总耗时上限，须为有限正数 |
 | `FRAMENOTE_MAX_UPLOAD_BYTES` | `2147483648` | 上传上限，单位为字节，默认 2 GiB；须为正整数 |
 | `FRAMENOTE_GALAXY_ENABLED` | `false` | `true`、`yes`、`1` 启用 Galaxy，不区分大小写；其他值关闭 |
 | `FRAMENOTE_GALAXY_BASE_URL` | `https://downloader-api.bhwa233.com` | Galaxy API 基址 |
 
 默认在同一虚拟环境安装服务与 `[asr]` 依赖。如果覆盖 `FRAMENOTE_ASR_PYTHON`，目标环境也必须安装 FrameNote 和 ASR 依赖。路径可以包含空格；在 shell 配置文件中用引号保护值，引号本身不属于变量值。
+
+HTTP API 本身没有账号认证。限制服务为受信网络访问；公网使用有访问控制的反向代理或受保护隧道，避免未授权者提交任务、读取材料或触发媒体下载。MCP 保留 localhost Host/Origin 检查，这项检查不替代外部访问控制。
 
 监听地址和端口由 Uvicorn 启动参数决定。同机访问使用 `--host 127.0.0.1`，局域网部署使用 `--host 0.0.0.0`；每个 workspace 只运行一个 worker。
 
@@ -98,7 +100,7 @@ Galaxy 使用 [galaxy-downloader](https://github.com/bhwa233/galaxy-downloader) 
 FRAMENOTE_GALAXY_ENABLED=true
 ```
 
-重新加载配置并重启服务后，检查 `/api/health` 中的 `galaxy_enabled=true`。Galaxy 获取失败时，任务以失败结束。
+重新加载配置并重启服务后，检查 `/api/health` 中的 `galaxy_enabled=true`。Galaxy 获取失败时，当前获取阶段失败；已完成的转录保留。启用后，目标视频的规范链接（包括 B站分 P）会发送给配置的第三方 Galaxy 服务；账号 Cookie 不发送给 Galaxy。请在受信且接受该链接披露的环境中启用。
 
 服务用 `ffmpeg` 下载并封装 HTTP Live Streaming（HLS）播放列表，用 `curl` 下载直链媒体，再根据 `ffprobe` 检测到的轨道判断是否保留独立音频。已完成素材会保留，失败或取消的临时下载会清理。解析响应中的临时媒体地址不写入公开元数据；服务机器仍需能访问返回的媒体 CDN。
 
@@ -177,6 +179,8 @@ FRAMENOTE_GALAXY_ENABLED=true
 ## 视频取回配置
 
 设置 `download_video: true` 或 `FRAMENOTE_DOWNLOAD_VIDEO=true` 后，客户端在取回材料时自动下载视频。`--download-video` 和 `--no-download-video` 覆盖单次执行。
+
+当前客户端会先创建后台媒体操作，再等待和下载；等待超时会保留 `operation_id`，可用 `operation TASK_ID OPERATION_ID --wait 45` 继续查询，或 `cancel-operation TASK_ID OPERATION_ID` 取消。超时不等于后台操作已停止。
 
 服务在视频可用时通过任务状态和材料清单返回 `downloads.video`，形式为 `/api/task/TASK_ID/video`，其中 `TASK_ID` 是实际任务 ID。客户端使用该入口，不依赖服务端绝对路径。HTTP GET 流式返回视频并支持 ETag 条件请求。
 

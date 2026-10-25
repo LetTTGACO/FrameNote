@@ -303,6 +303,14 @@ unit 使用 `KillMode=mixed`：systemd 先向主进程发送 SIGTERM，让服务
 
 保留这个设置。默认 `control-group` 可能先终止推理进程，导致正常停机被记为 ASR 失败，并在关停前启动下一项任务。相关真实检查见[生命周期验收](VALIDATION-NATIVE.md#生命周期与兼容)。
 
+## 字幕与按需媒体的运行配置
+
+B站默认优先读取平台字幕，无可用字幕时继续媒体获取和 ASR。服务仍按 `/api/ready` 检查 ASR 模型及依赖；字幕优先不替代模型准备。授权登录文件通过服务端本地 `python -m framenote.credentials import/status/clear` 管理，并用 `FRAMENOTE_BILIBILI_CREDENTIALS` 指向专用私有文件，详见[凭据管理](CONFIGURATION.md#b站私有凭据管理)。在 systemd 布局中可使用服务用户所有的 `/var/lib/framenote-private/`（0700）与其中的凭据文件（0600）；凭据与 `workspace/tasks/`、源码归档及客户端材料分开保管。
+
+HTTP API 供受信访问；监听局域网时用防火墙限制调用者，公网经访问控制的代理或隧道接入。启用 Galaxy 会向第三方披露规范视频链接，配置前阅读[Galaxy 获取配置](CONFIGURATION.md#galaxy-获取配置)。`FRAMENOTE_PROCESS_TIMEOUT` 按阶段生效，字幕请求的重试和退避共享阶段截止时间；等待媒体操作的客户端超时不会取消服务端操作。
+
+验收候选版本时使用独立 workspace 与端口（如 18122），先确认 `/api/ready=200`；检查字幕任务未提前获取媒体、分页全文与字幕原件哈希，再请求截图和有声视频，检查实际帧时间、音轨与缓存。旧版同步截图入口在媒体尚未准备时返回 `409/media_preparation_required`；升级客户端后使用后台媒体操作。
+
 ## 备份数据和环境
 
 升级前，按以下步骤制作可恢复的备份：
@@ -313,7 +321,7 @@ unit 使用 `KillMode=mixed`：systemd 先向主进程发送 SIGTERM，让服务
 4. 在客户端备份笔记根目录，包括两份阅读稿和 `materials/`。
 5. 在独立目录检查备份副本，核对转录与截图的 SHA-256、任务状态和笔记中的本地引用。
 
-workspace 备份应包含源视频、独立音轨、`task.json`、转录、截图和已落盘临时材料。systemd 示例中的备份目标为 `/var/lib/framenote`、`/etc/framenote`、`/opt/framenote/.venv` 及对应 unit。模型可按锁文件重新下载，也可归档后用 `models verify` 核验。
+workspace 备份应包含已有源视频、独立音轨、`task.json`、转录、原始字幕、ASR 原件、候选尝试、`operations/`、媒体索引、截图和已落盘临时材料。字幕任务可以没有媒体。私有凭据单独按受限权限备份，不混入任务材料。systemd 示例中的备份目标为 `/var/lib/framenote`、`/etc/framenote`、`/opt/framenote/.venv` 及对应 unit。模型可按锁文件重新下载，也可归档后用 `models verify` 核验。
 
 虚拟环境脚本包含绝对路径；恢复环境归档时使用原机器的原路径。保留原目录，使用副本验证恢复过程。
 
@@ -347,6 +355,8 @@ workspace 备份应包含源视频、独立音轨、`task.json`、转录、截�
 
 7. 启动正式服务。
 8. 用旧任务 ID 回读转录和截图，并提交一个新任务，确认旧材料可读且新任务完成。
+
+服务升级后，同步更新已安装的 `skills/framenote/` 完整目录（Skill 与 `scripts/headless.py` 一起更新），保留客户端 JSON 配置和现有笔记。新客户端可读取 v1/v2/v3 材料并恢复后台媒体等待；`--force-asr` 产生新任务时必须使用新的笔记目录，目录身份保护会拒绝覆盖旧字幕笔记。
 
 升级期间保留模型与 workspace。记录安装版本和验证结果；如果检查失败，按[恢复旧版本](#恢复旧版本)恢复。
 

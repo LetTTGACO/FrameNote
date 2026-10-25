@@ -1,6 +1,6 @@
 # FrameNote
 
-FrameNote 可以将 B站、抖音、YouTube 或本地视频整理成可阅读、可追溯的章节笔记。HTTP 服务获取视频、生成转录并按需截图；Agent 通过 Skill 客户端或 MCP 读取材料，撰写章节笔记和分章原稿。
+FrameNote 可以将 B站、抖音、YouTube 或本地视频整理成可阅读、可追溯的章节笔记。B站优先读取平台字幕轨，轨道不可用时获取媒体并运行 ASR；截图和有声视频按需准备。HTTP 服务保留可追溯的原始材料；Agent 通过 Skill 客户端或 MCP 读取材料，撰写章节笔记和分章原稿。
 
 从本页完成服务启动和 Skill 配置后，你可以发送视频链接开始整理。服务器运维见[部署指南](docs/DEPLOYMENT.md)，日常命令见[使用指南](docs/USAGE.md)。
 
@@ -148,7 +148,9 @@ python3 -S skills/framenote/scripts/headless.py transcribe 'VIDEO_SOURCE' \
 
 将 `VIDEO_SOURCE` 替换为视频链接或本地视频路径。成功后，材料保存在 `my-note/materials/`；阅读文档由 Agent 根据这些材料撰写。检查 `materials/bundle.json` 中的任务状态是否为 `completed`、`download_complete` 是否为 `true`。
 
-视频自动取回默认关闭。转录分页、任务管理、截图和视频取回见[使用指南](docs/USAGE.md)。
+字幕任务的 `completed` 表示文字材料已完成，此时服务端可以没有视频、音频或 ASR 原件。截图请求会后台准备视频；取回有声视频时再补齐需要的音轨。媒体操作失败或取消不会撤销已完成的转录。需要重新识别时使用 `transcribe --force-asr` 创建新任务，并为新任务选择新的笔记目录。
+
+视频自动取回默认关闭。B站登录仅在服务端通过[私有凭据管理](docs/CONFIGURATION.md#b站私有凭据管理)配置，服务应限制在受信网络或受保护隧道内。转录分页、任务管理、截图和视频取回见[使用指南](docs/USAGE.md)。
 
 ## 继续阅读
 

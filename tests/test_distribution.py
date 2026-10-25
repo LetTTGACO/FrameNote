@@ -26,12 +26,27 @@ def distributions(tmp_path_factory):
     return next(output.glob("*.whl")),next(output.glob("*.tar.gz"))
 
 
+def assert_private_files_excluded(names):
+    for name in names:
+        path = Path(name)
+        assert not any(part in {".local", ".superpowers", ".runtime", "workspace", "models", ".codex"}
+                       for part in path.parts), name
+        assert not name.startswith("docs/superpowers/"), name
+        assert path.name not in {"service.env", ".framenote.json", "cookies.json", "bilibili.json"}, name
+        assert not path.name.endswith((".cookie", ".cookies")), name
+
+
 def test_wheel_and_sdist_contents(distributions):
     wheel,source=distributions
     with zipfile.ZipFile(wheel) as archive:
         names=archive.namelist()
         assert "framenote/asr/models.lock.json" in names
         assert "framenote/service_mcp.py" in names
+        expected_modules = {f"framenote/{name}.py" for name in (
+            "credentials", "platform_http", "bilibili", "subtitles", "materials", "media_jobs",
+        )}
+        assert expected_modules <= set(names), expected_modules - set(names)
+        assert_private_files_excluded(names)
         metadata = archive.read(next(name for name in names if name.endswith(".dist-info/METADATA"))).decode()
         assert "Requires-Dist: mcp" in metadata
         assert any(name.endswith("/licenses/LICENSE") for name in names)
@@ -45,7 +60,7 @@ def test_wheel_and_sdist_contents(distributions):
         assert expected <= names,expected-names
         assert not any(part in {".local",".superpowers","workspace","models"} for name in names for part in Path(name).parts)
         assert not any(name.startswith("docs/superpowers/") for name in names)
-        assert ".framenote.json" not in names
+        assert_private_files_excluded(names)
         assert not any(name.startswith(".codex/") for name in names)
 
 
@@ -69,8 +84,19 @@ def test_installed_wheel_runs_outside_checkout(distributions,tmp_path):
     assert probe["counts"]=={"sensevoice":6,"vad":4}
     assert probe["heavy"]==[]
     mcp_probe = "import asyncio; from framenote.service_mcp import create_mcp; print(len(asyncio.run(create_mcp().list_tools())))"
-    assert checked([str(python), "-c", mcp_probe], cwd=outside, env=env).stdout.strip() == "9"
+    assert checked([str(python), "-c", mcp_probe], cwd=outside, env=env).stdout.strip() == "12"
     checked([str(python),"-m","framenote.asr_sensevoice","--help"],cwd=outside,env=env)
+    checked([str(python), "-m", "framenote.credentials", "--help"], cwd=outside, env=env)
+    credentials_probe = """import contextlib, io, json, runpy, sys
+sys.argv = ['framenote.credentials', '--help']
+with contextlib.redirect_stdout(io.StringIO()):
+    try:
+        runpy.run_module('framenote.credentials', run_name='__main__')
+    except SystemExit as error:
+        assert error.code == 0
+print(json.dumps([name for name in ('funasr_onnx', 'onnxruntime', 'numpy', 'soundfile') if name in sys.modules]))
+"""
+    assert json.loads(checked([str(python), "-c", credentials_probe], cwd=outside, env=env).stdout) == []
     child=subprocess.run([str(python),"-m","framenote.models","verify","--out","models"],cwd=outside,env=env,capture_output=True,text=True)
     assert child.returncode==1
     assert "chn_jpn_yue_eng_ko_spectok.bpe.model" in child.stderr
