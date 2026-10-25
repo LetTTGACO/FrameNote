@@ -83,6 +83,8 @@ FRAMENOTE_BILIBILI_CREDENTIALS=/private/framenote/bilibili.json
 
 修改配置路径后需重新加载服务环境。获取操作按路径读取凭据文件，原子导入更新文件后，下次读取即可使用新内容。凭据值不进入命令行参数、HTTP/MCP 参数、任务材料或日志。
 
+长期运行时使用独立于版本安装目录和任务数据的固定绝对路径。升级、重启和兼容版本回滚保留该文件、权限及环境变量配置，继续复用登录态，无需因版本切换重新扫码。文件长期保存不保证平台登录态永久有效；首次登录或失效后，在服务机器通过无头扫码辅助流程取得新凭据并原子导入。部署必须同时通过[在线登录与平台字幕验收](DEPLOYMENT.md#b站登录与字幕验收)，不能只检查本地 `usable` 或 ASR 回退结果。
+
 账号 Cookie 仅发送给 `api.bilibili.com`、`www.bilibili.com`、`bilibili.com`、`passport.bilibili.com`，CDN 请求不带账号 Cookie。受控请求仅允许 HTTPS 的 `hdslb.com`、`bilibili.com`、`bilivideo.com`、`bilivideo.cn` 及其子域，每次重定向重新验证目标和 Cookie 范围，最多跟随 5 跳。请求适配器对临时网络错误最多尝试 3 次，单次最多 20 秒，退避 1 / 2 秒，并遵守阶段总截止时间和 `Retry-After`；认证失效直接分类，供获取流程回退。
 
 ## Galaxy 获取配置

@@ -177,7 +177,8 @@ Ubuntu 按 [Deno 安装说明](https://docs.deno.com/runtime/getting_started/ins
 
    应返回 HTTP `200`，且 `configured`、`available` 均为 `true`。
 
-5. 按[使用指南](USAGE.md#提交视频)提交一段有音轨的短视频，检查任务完成、转录可读且截图可取回。
+5. 完成下方 [B站登录与字幕验收](#b站登录与字幕验收)，确认服务器登录态有效且实际取得平台字幕。
+6. 按[使用指南](USAGE.md#提交视频)提交一段有音轨的短视频，检查任务完成、转录可读且截图可取回。
 
 用 Ctrl-C 或 SIGTERM 正常停止服务。运行中的任务标记为 `failed/interrupted`，排队任务在重启后继续，已落盘材料保留。需要重新处理时，重新提交视频。
 
@@ -193,6 +194,7 @@ Ubuntu 按 [Deno 安装说明](https://docs.deno.com/runtime/getting_started/ins
 | 发布包 | `/opt/framenote/artifacts/v0.2.1` |
 | 环境文件 | `/etc/framenote/service.env` |
 | workspace | `/var/lib/framenote` |
+| B站私有凭据 | `/var/lib/framenote-private/bilibili.json`，独立于版本目录 |
 
 先安装系统依赖，并把 wheel 放在服务用户可读取的位置，再完成以下步骤：
 
@@ -252,6 +254,7 @@ Ubuntu 按 [Deno 安装说明](https://docs.deno.com/runtime/getting_started/ins
 
    ```text
    FRAMENOTE_WORKSPACE=/var/lib/framenote
+   FRAMENOTE_BILIBILI_CREDENTIALS=/var/lib/framenote-private/bilibili.json
    FRAMENOTE_SENSEVOICE_MODEL=/opt/framenote/models/sensevoice
    FRAMENOTE_VAD_MODEL=/opt/framenote/models/vad
    ```
@@ -302,7 +305,7 @@ Ubuntu 按 [Deno 安装说明](https://docs.deno.com/runtime/getting_started/ins
     sudo journalctl -u framenote.service -n 60 --no-pager
     ```
 
-14. 按[启动并验证服务](#启动并验证服务)检查 `/api/ready` 并处理短视频。
+14. 按[启动并验证服务](#启动并验证服务)检查 `/api/ready`、在线 B站登录态、平台字幕任务及短视频处理。
 
 模板监听 `0.0.0.0:18121`，使用单 worker、专用用户、工作目录和环境文件。`StateDirectory` 创建数据目录，失败后等待 5 秒重启。客户端配置填写这台机器可达的 HTTP 基址。
 
@@ -319,9 +322,53 @@ unit 使用 `KillMode=mixed`：systemd 先向主进程发送 SIGTERM，让服务
 
 B站默认优先读取平台字幕，无可用字幕时继续媒体获取和 ASR。服务仍按 `/api/ready` 检查 ASR 模型及依赖；字幕优先不替代模型准备。授权登录文件通过服务端本地 `python -m framenote.credentials import/status/clear` 管理，并用 `FRAMENOTE_BILIBILI_CREDENTIALS` 指向专用私有文件，详见[凭据管理](CONFIGURATION.md#b站私有凭据管理)。在 systemd 布局中可使用服务用户所有的 `/var/lib/framenote-private/`（0700）与其中的凭据文件（0600）；凭据与 `workspace/tasks/`、源码归档及客户端材料分开保管。
 
+凭据保存在服务机器的固定绝对路径，独立于 `releases/`、虚拟环境和 `current` 指针。升级、重启及兼容版本回滚继续引用同一份凭据，保留环境文件中的路径与文件权限；正常版本切换无需重新扫码。凭据文件可以长期保存，但不能保证平台登录态永久有效。首次登录或登录失效时，在服务机器运行无头登录辅助流程生成二维码，用户远程扫码后通过上述本地 CLI 导入；调用端只展示二维码，不持有服务凭据。当前版本的扫码流程是运维辅助操作，导入和读取由现有凭据 CLI 及服务完成。
+
 HTTP API 供受信访问；监听局域网时用防火墙限制调用者，公网经访问控制的代理或隧道接入。启用 Galaxy 会向第三方披露规范视频链接，配置前阅读[Galaxy 获取配置](CONFIGURATION.md#galaxy-获取配置)。`FRAMENOTE_PROCESS_TIMEOUT` 按阶段生效，字幕请求的重试和退避共享阶段截止时间；等待媒体操作的客户端超时不会取消服务端操作。
 
 验收候选版本时使用独立 workspace 与端口（如 18122），先确认 `/api/ready=200`；检查字幕任务未提前获取媒体、分页全文与字幕原件哈希，再请求截图和有声视频，检查实际帧时间、音轨与缓存。旧版同步截图入口在媒体尚未准备时返回 `409/media_preparation_required`；升级客户端后使用后台媒体操作。
+
+### B站登录与字幕验收
+
+首次部署、升级切换和支持字幕优先的版本回滚后，都必须在服务机器完成以下检查，才能标记部署验收通过。候选环境先做同样检查；切换后以正式实例再验证一次。
+
+1. 以服务用户、已安装版本的 Python、实际工作目录及与服务一致的环境变量检查凭据。确认 `FRAMENOTE_BILIBILI_CREDENTIALS` 指向保留的固定文件，并按[凭据管理](CONFIGURATION.md#b站私有凭据管理)运行 `status`。`usable=true` 只表示本地可读，不代表平台仍认可登录态。
+2. 在同一环境运行下面的只读在线探针。它使用现有受控请求适配器，仅在平台返回 `code=0` 且 `data.isLogin=true` 时成功，输出不含 Cookie 或账号资料：
+
+   ```bash
+   python - <<'PY'
+   import time
+   from framenote.credentials import load_credentials
+   from framenote.platform_http import BilibiliHTTP, BilibiliHTTPError
+   from framenote.service_settings import Settings
+
+   settings = Settings.from_env()
+   credentials, state = load_credentials(
+       settings.bilibili_credentials,
+       forbidden_root=settings.workspace / 'tasks',
+   )
+   if credentials is None:
+       print('bilibili_login=failed reason=credentials_' + state)
+       raise SystemExit(1)
+   try:
+       payload = BilibiliHTTP(credentials, deadline=time.monotonic() + 60).get_json(
+           'https://api.bilibili.com/x/web-interface/nav'
+       )
+   except BilibiliHTTPError as exc:
+       print('bilibili_login=unverified reason=' + exc.code)
+       raise SystemExit(1)
+   data = payload.get('data')
+   logged_in = (payload.get('code') == 0 and isinstance(data, dict)
+                and data.get('isLogin') is True)
+   print('bilibili_login=' + ('valid' if logged_in else 'failed'))
+   raise SystemExit(0 if logged_in else 1)
+   PY
+   ```
+
+3. 通过待验收的服务提交一条新 B站任务，选择已确认有可用字幕轨的视频及固定分 P，不强制 ASR。检查任务完成，`source_kind` 为 `platform_subtitle` 或 `platform_auto_caption`，分页全文可读且字幕原件保留；在请求媒体之前确认没有提前下载媒体或运行 ASR。仅回读旧任务不能证明当前登录与获取链路有效。
+4. 在私有运维记录中保存检查时间、运行版本 / 提交、在线检查结果、视频与分 P、任务 ID、字幕来源及验证结果。凭据值与完整账号响应不进入记录。
+
+HTTP `200`、`/api/health` 正常、`/api/ready=200`、本地 `usable=true` 或任务回退 ASR 成功，都不能单独代替登录及字幕验收。凭据缺失或失效时先完成扫码和导入；网络错误、风控或响应异常应标为“未验证”并排查重试，不据此直接判定凭据过期。没有取得上述成功证据时，记录“服务可运行，B站登录与字幕验收未通过”，不能报告部署完整成功。运行期间仍保留既有 ASR 回退策略。
 
 ## 备份数据和环境
 
@@ -339,7 +386,7 @@ workspace 备份应包含已有源视频、独立音轨、`task.json`、转录�
 
 ## 升级服务
 
-为新版本创建独立目录和虚拟环境，安装已归档 wheel，在独立 workspace / 端口完成候选验收。随后停服备份，切换 `current`，核对匹配配置 / 模型后启动，检查版本、就绪状态、旧材料和新任务。具体命令与首次迁移旧布局的恢复方式见[升级切换](RELEASING.md#升级切换)。旧环境保留原路径，不原地升级。
+为新版本创建独立目录和虚拟环境，安装已归档 wheel，在独立 workspace / 端口完成候选验收。随后停服备份，切换 `current`，核对匹配配置 / 模型后启动，检查版本、就绪状态、旧材料和新任务，并完成 [B站登录与字幕验收](#b站登录与字幕验收)。保留固定凭据文件及其配置路径。具体命令与首次迁移旧布局的恢复方式见[升级切换](RELEASING.md#升级切换)。旧环境保留原路径，不原地升级。
 
 服务升级后，同步更新已安装的 `skills/framenote/` 完整目录（Skill 与 `scripts/headless.py` 一起更新），保留客户端 JSON 配置和现有笔记。新客户端可读取 v1/v2/v3 材料并恢复后台媒体等待；`--force-asr` 产生新任务时必须使用新的笔记目录，目录身份保护会拒绝覆盖旧字幕笔记。
 
@@ -363,5 +410,6 @@ workspace 备份应包含已有源视频、独立音轨、`task.json`、转录�
 | `Workspace already in use` | 找出占用 workspace 的实例；为候选实例使用独立数据目录 |
 | `failed/interrupted` | 读取保留材料，需要重新处理时重新提交；排队任务在重启后继续 |
 | 客户端拒绝覆盖本地材料 | 对同一任务使用原目录；对新任务使用独立 `--out-dir` |
+| B站任务出现 `auth_required`，或登录验收失败 | 核对服务实际凭据路径与权限，运行在线探针；确认失效后在服务机器重新扫码导入，再提交新的字幕任务验收 |
 
-部署验收分别记录进程活性、ASR 就绪、真实推理和阅读结果。历史验收示例见[原生部署验收记录](VALIDATION-NATIVE.md)。
+部署验收分别记录进程活性、ASR 就绪、B站在线登录、平台字幕、真实推理和阅读结果。历史验收示例见[原生部署验收记录](VALIDATION-NATIVE.md)。
