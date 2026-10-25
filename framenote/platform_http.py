@@ -7,6 +7,7 @@ from email.utils import parsedate_to_datetime
 from http.client import HTTPException, HTTPResponse
 import json
 import math
+import re
 import signal
 import threading
 import time
@@ -215,6 +216,77 @@ class BilibiliHTTP:
                 raise _error('deadline_exceeded') from None
             time.sleep(delay)
         raise _error('network_error')
+
+    def resolve_short_url(self, url: str) -> str:
+        """Expand b23 identity links without cookies or fetching video HTML."""
+        try:
+            parsed = urlsplit(url)
+            if parsed.scheme == 'http' and parsed.hostname == 'b23.tv':
+                url = urlunsplit(parsed._replace(scheme='https'))
+        except ValueError:
+            raise _error('unsafe_target') from None
+        opener = urllib.request.build_opener(_NoRedirect())
+        for hop in range(6):
+            try:
+                parsed = urlsplit(url)
+                host = parsed.hostname
+                if (parsed.scheme != 'https' or host not in {'b23.tv', 'www.bilibili.com', 'bilibili.com'}
+                        or parsed.username is not None or parsed.password is not None or parsed.port not in {None, 443}
+                        or any(ord(char) < 33 or ord(char) == 127 for char in url)
+                        or (host != 'b23.tv' and not re.fullmatch(r'/video/(?:BV[0-9A-Za-z]{10}|av[1-9][0-9]*)/?', parsed.path))):
+                    raise _error('unsafe_target')
+            except ValueError:
+                raise _error('unsafe_target') from None
+            _remaining(self._deadline)
+            if host != 'b23.tv':
+                return url
+            for attempt in range(3):
+                try:
+                    deadline = min(self._deadline, time.monotonic() + 15)
+                    with _attempt_guard(deadline):
+                        request = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+                        try:
+                            response = opener.open(request, timeout=_remaining(deadline))
+                        except urllib.error.HTTPError as exc:
+                            try:
+                                _remaining(deadline)
+                                if exc.code not in _REDIRECTS:
+                                    raise _http_error(exc) from None
+                                location = exc.headers.get('Location') if exc.headers else None
+                                if not location or hop == 5 or any(ord(char) < 33 or ord(char) == 127 for char in location):
+                                    raise _error('unsafe_target')
+                                url = urljoin(url, location)
+                            finally:
+                                exc.close()
+                        else:
+                            response.close()
+                            _remaining(deadline)
+                            raise _error('invalid_response')
+                    break
+                except (urllib.error.URLError, OSError, HTTPException):
+                    error = _error('network_error')
+                    error._retryable = True
+                except BilibiliHTTPError as exc:
+                    error = exc
+                except ValueError:
+                    error = _error('unsafe_target')
+                if not error._retryable or attempt == 2:
+                    raise error from None
+                delay = float(attempt + 1)
+                if error._retry_after:
+                    try:
+                        retry_after = float(error._retry_after)
+                    except ValueError:
+                        try:
+                            retry_after = (parsedate_to_datetime(error._retry_after) - datetime.now(timezone.utc)).total_seconds()
+                        except (ValueError, TypeError, OverflowError):
+                            retry_after = 0
+                    if math.isfinite(retry_after):
+                        delay = max(delay, retry_after)
+                if delay >= _remaining(self._deadline):
+                    raise _error('deadline_exceeded') from None
+                time.sleep(delay)
+        raise _error('unsafe_target')
 
     def get_json(self, url: str, params: dict | None = None) -> dict:
         validate_bilibili_target(url)

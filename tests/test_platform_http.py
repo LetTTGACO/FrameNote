@@ -485,3 +485,53 @@ def test_strict_requests_reject_blocked_alarm_before_network(transport):
         assert transport.requests == []
     finally:
         signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
+
+
+def test_short_chain_no_cookie_and_returns_video_without_html(transport):
+    transport.outcomes = [http_error(302, '/next'), http_error(302, 'https://www.bilibili.com/video/BV1xM4y1z7Kt?p=2')]
+    client = BilibiliHTTP(BilibiliCredentials({'SESSDATA': 'secret'}), deadline=160)
+    assert client.resolve_short_url('http://b23.tv/demo') == 'https://www.bilibili.com/video/BV1xM4y1z7Kt?p=2'
+    assert [request.full_url for request in transport.requests] == ['https://b23.tv/demo', 'https://b23.tv/next']
+    assert all(request.get_header('Cookie') is None for request in transport.requests)
+    assert transport.timeouts == [15, 15]
+
+
+@pytest.mark.parametrize('target', ['https://attacker.test/video/x', 'https://i0.hdslb.com/x', 'https://api.bilibili.com/x',
+    'https://b23.tv.attacker.test/x', 'http://www.bilibili.com/video/BV1xM4y1z7Kt', 'https://user:secret@b23.tv/x',
+    'https://www.bilibili.com:8443/video/BV1xM4y1z7Kt', 'https://www.bilibili.com/account'])
+def test_short_redirect_rejects_unsafe_identity_targets(transport, target):
+    transport.outcomes = [http_error(302, target)]
+    with pytest.raises(BilibiliHTTPError) as error:
+        BilibiliHTTP(None, deadline=160).resolve_short_url('https://b23.tv/demo')
+    assert error.value.code == 'unsafe_target'
+    assert len(transport.requests) == 1
+
+
+def test_short_redirect_limit(transport):
+    transport.outcomes = [http_error(302, '/next')] * 6
+    with pytest.raises(BilibiliHTTPError) as error:
+        BilibiliHTTP(None, deadline=160).resolve_short_url('https://b23.tv/demo')
+    assert error.value.code == 'unsafe_target' and len(transport.requests) == 6
+
+
+def test_short_requests_share_stage_deadline(transport):
+    def slow_open(request, timeout):
+        transport.timeouts.append(timeout)
+        transport.now += 4
+        raise http_error(302, '/next')
+    transport.open = slow_open
+    with pytest.raises(BilibiliHTTPError) as error:
+        BilibiliHTTP(None, deadline=105).resolve_short_url('https://b23.tv/demo')
+    assert error.value.code == 'deadline_exceeded'
+    assert transport.timeouts == [5, 1]
+
+
+def test_short_transport_guard_rejects_thread_and_general_download_stays_strict(transport):
+    import concurrent.futures
+    client = BilibiliHTTP(None, deadline=160)
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        with pytest.raises(RuntimeError, match='main thread'):
+            executor.submit(client.resolve_short_url, 'https://b23.tv/demo').result()
+    with pytest.raises(BilibiliHTTPError) as error:
+        client.download('https://b23.tv/demo', referer='https://www.bilibili.com/')
+    assert error.value.code == 'unsafe_target' and transport.requests == []

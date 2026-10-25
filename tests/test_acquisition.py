@@ -495,3 +495,64 @@ def test_legacy_bulk_media_keeps_socket_timeout_without_new_whole_body_limit(tmp
     result = MediaDownloader(tmp_path)._download_direct_media('https://cn.bilivideo.com/audio', target, _BILI_URL, None, user_agent=MediaDownloader.BILI_USER_AGENT)
     assert result == target and result.read_bytes() == b'media'
     assert clock['now'] > 160
+
+
+def test_subtitle_worker_writes_public_outcome_on_main_thread(tmp_path, monkeypatch):
+    import threading
+    from framenote import service_acquire
+    from framenote.subtitles import SubtitleOutcome
+    from framenote.service_settings import Settings
+    task_id = '1' * 32
+    settings = Settings.from_env({})
+    monkeypatch.setattr(service_acquire.Settings, 'from_env', lambda: settings)
+    seen = {}
+    def credentials(path, *, forbidden_root):
+        seen['credentials'] = (path, forbidden_root)
+        return None, 'missing'
+    def http(credentials, *, deadline):
+        seen['deadline'] = deadline
+        return object()
+    def fetch(url, directory, *, client):
+        assert threading.current_thread() is threading.main_thread()
+        assert directory == tmp_path / task_id
+        seen['fetch'] = True
+        return SubtitleOutcome(None, None, [], 'network_error')
+    monkeypatch.setattr(service_acquire, 'load_credentials', credentials)
+    monkeypatch.setattr(service_acquire, 'BilibiliHTTP', http)
+    monkeypatch.setattr(service_acquire, 'BilibiliClient', lambda http: object())
+    monkeypatch.setattr(service_acquire, 'fetch_bilibili_subtitles', fetch)
+    monkeypatch.setattr(service_acquire.time, 'monotonic', lambda: 100.)
+    service_acquire.acquire_subtitles(tmp_path, task_id, _BILI_URL)
+    payload = json.loads((tmp_path / task_id / 'subtitle-acquisition.json').read_text())
+    assert payload['fallback_reason'] == 'network_error'
+    assert seen['deadline'] == 7300 and seen['fetch']
+    assert seen['credentials'][1] == tmp_path.resolve()
+    assert not (tmp_path / task_id / 'acquisition.json').exists()
+
+
+def test_subtitle_worker_preserves_input_error_protocol_and_validates_task_id(tmp_path, monkeypatch):
+    from framenote import service_acquire
+    from framenote.subtitles import BilibiliInputError, SubtitleOutcome
+    def invalid(*args, **kwargs):
+        raise BilibiliInputError('invalid_video_part', 'Invalid Bilibili part')
+    monkeypatch.setattr(service_acquire, 'fetch_bilibili_subtitles', invalid)
+    settings = service_acquire.Settings.from_env({})
+    monkeypatch.setattr(service_acquire.Settings, 'from_env', lambda: settings)
+    task_id = '2' * 32
+    service_acquire.acquire_subtitles(tmp_path, task_id, _BILI_URL)
+    payload = json.loads((tmp_path / task_id / 'subtitle-acquisition.json').read_text())
+    assert payload['error'] == {'code': 'invalid_video_part', 'message': 'Invalid Bilibili part'}
+    with pytest.raises(BilibiliInputError) as error:
+        SubtitleOutcome.from_payload(payload)
+    assert error.value.code == 'invalid_video_part'
+    with pytest.raises(KeyError):
+        service_acquire.acquire_subtitles(tmp_path, '../escape', _BILI_URL)
+
+
+def test_acquisition_cli_defaults_full_and_dispatches_subtitles_synchronously(tmp_path, monkeypatch):
+    from framenote import service_acquire
+    calls = []
+    monkeypatch.setattr('sys.argv', ['acquire', '--root', str(tmp_path), '--task-id', '3' * 32, '--url', _BILI_URL, '--mode', 'subtitles'])
+    monkeypatch.setattr(service_acquire, 'acquire_subtitles', lambda *args: calls.append(args))
+    service_acquire.main()
+    assert calls == [(tmp_path, '3' * 32, _BILI_URL)]
