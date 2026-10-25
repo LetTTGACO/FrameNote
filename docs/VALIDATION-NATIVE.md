@@ -57,7 +57,7 @@
 
 ### 待完成的真实验收
 
-本次没有取得新授权的有效登录文件，以下检查仍待完成：有效字幕阳性任务（无提前下载媒体和 ASR 原件、分页与原始字幕哈希）、本次认证响应确认的 `no_tracks`、真实登录失效副本、字幕任务后续截图与有声视频及仅下载一次、force-ASR 新任务保留旧字幕目录。历史字幕段数和候选视频只作线索，不作为通过证据。
+以下为本轮发生时的历史状态；后续认证实测见下方“认证字幕、媒体升级与 ASR 回退”。本次没有取得新授权的有效登录文件，以下检查仍待完成：有效字幕阳性任务（无提前下载媒体和 ASR 原件、分页与原始字幕哈希）、本次认证响应确认的 `no_tracks`、真实登录失效副本、字幕任务后续截图与有声视频及仅下载一次、force-ASR 新任务保留旧字幕目录。历史字幕段数和候选视频只作线索，不作为通过证据。
 
 N100 Ubuntu x86_64 / Python 3.10 的新代码原生验证也未执行：当前授权排除部署和远端启动/替换。2026-10-20 的旧代码 N100 验收与本机 Python 3.10 行为测试分别记录，不能替代该项。
 
@@ -80,6 +80,48 @@ N100 Ubuntu x86_64 / Python 3.10 的新代码原生验证也未执行：当前�
 本次实际测试的 `media_jobs.py` SHA-256 为 `5543f303015528b84bfa03a48f1c4cc210b13e268bd64a05d5d63cdcec3283d2`；四个修改后运行模块的完整哈希、操作对象、调用序列和关闭记录见本地 `native-probes/final-fix-native.json`。初次启动脚本误将正常 SIGTERM 的 `-15` 当作断言失败，随后修正该验证假设、保留初次日志，并以新帧点重新完成全部检查。
 
 上述有效登录字幕阳性、认证 `no_tracks`、真实账号过期、真实字幕任务的按需媒体与 force-ASR 保留，以及 N100 新代码原生验收仍待完成。本轮本地恢复测试不能替代这些平台和部署组合的验收。
+
+## 2026-10-25：认证字幕、媒体升级与 ASR 回退
+
+本轮在已评审源码 `568e829d31b77abfc16e4edfc25e6630bd2a2fb7` 上完成新增认证实测。使用同一 Apple Silicon macOS / Python 3.12.13 原生 SenseVoice 环境、固定模型和隔离 workspace，服务仅监听 `127.0.0.1:18122`，Galaxy 关闭。运行源码未修改；启动脚本只记录真实媒体获取和探测调用，再委托原函数执行。凭据仅通过私有文件路径配置；本轮没有部署或替换正式服务。
+
+### 有效登录字幕与分页原件
+
+提交 [BV1Qwby6DEu1，第 1 P](https://www.bilibili.com/video/BV1Qwby6DEu1?p=1)，任务 `51ab7a9459bd4754a7836b530cb45504` 实际 completed：平台时长 204 秒、CID `40943289185`、79 段 `ai-zh`，`source_kind=platform_auto_caption`、`generation=ai`、`timestamp_kind=subtitle_interval`、schema v3。准备 / 总计为 0.575 / 0.578 秒，提交至终态墙钟 1.023 秒。
+
+完成文字时没有视频、音频、ASR 原件或 `asr_run`，真实媒体获取与探测调用均为零。全部 79 段逐项等于实际字幕 JSON 的 `from/to/content` 规范映射，小数秒保留；每页 7 段的 12 页拼接等于完整段落。`subtitle.raw.json`、选中候选 `subtitle-0001.raw.json` 与 provenance 的 SHA-256 均为 `c75eaf7f567ed25c13bc8262a670c01a212c227ebb9369b9ea7d3106260d6760`。`transcript.json` SHA-256 为 `a12dd43b2cb67deccbf9fcb5dbad5597192473d6deaa84494bc6288adf815e2d`。
+
+本次覆盖诊断为首句 0、末句 203.28 秒、最大间隔约 3.681 秒、区间并集覆盖约 0.8973；`completeness=unknown`，没有据此宣称完整覆盖原音频。
+
+### 真实截图与仅补音频
+
+先提交截图操作 `edc42f1020f6497f887f5d748c6f72c3`：请求 1.123 / 5.123 秒，真实解码 PTS 为 1.139312 / 5.126875 秒，JPEG 字节及 SHA-256 核对通过。随后有声视频操作 `fc89c2288d374c7195ff64b330bee055` 完成。
+
+启动脚本观测该任务的真实 `Pipeline.acquire_asset` 调用顺序恰为 `video → audio`：首次只取得视频，升级只补音频；没有第二次视频获取。原视频 3,233,330 字节、文件指纹与 SHA-256 `2f148a32c8a20756753458a917cfe9a9c7636e71247e02f56f4a90c095538ae7` 在升级前后完全一致。合并后视频 6,727,179 字节，SHA-256 `676886d8cc8cd15082f32ae81a2eb76a38748df92ecef3dbb6f70a384ae262c6`，ffprobe 确认 h264 视频和 aac 音频、时长 203.265813 秒。媒体操作前后的任务、字幕及全部初始文字原件 SHA-256 不变。
+
+### 标准库客户端与新任务保留
+
+将当前 `headless.py` 原字节复制至源码外，以 `python -S` 在源码外执行真实 HTTP `fetch`，显式关闭自动视频取回。字幕与强制 ASR 的 bundle 均为 schema v3、`download_complete=true`，分别进入各自任务目录。字幕选中原件及所有实际候选的客户端 / 服务端哈希一致；本次第一候选即选中，没有失败候选原件可供本次实测。
+
+在旧字幕任务的服务端目录与客户端输出写入明确标注的验收阅读稿、分章稿、纠错标记后，再对同 URL 提交 `force_asr=true`。新任务实际执行 SenseVoice，并取回到另一目录；旧任务完整目录哈希不变。再次取回旧字幕任务后，其原材料、阅读稿和纠错标记仍逐字节不变。标记是验收样本，不代表用户人工校对。
+
+### 认证 no_tracks 与模拟失效副本
+
+[本次无字幕候选 BV1dK411K7Fe，第 3 P](https://www.bilibili.com/video/BV1dK411K7Fe?p=3) 本轮在有效身份下真实返回空字幕轨；`need_login_subtitle` 未触发，任务记录 `fallback_reason=no_tracks`、`tracks/empty`，随后完成真实 ASR。固定身份为 `aid=499615442 / cid=232639680 / page=3 / platform duration=1008`；实测媒体时长 1007.672 秒。
+
+另将有效凭据复制到专用私有文件，只在副本中故意改写 `SESSDATA`，通过本地 import 原子切换服务所读文件。同一字幕阳性 URL 随后实际返回 `auth_required` 并完成 ASR；这是 **模拟无效副本**，不代表真实账号自然过期。测试后已原子恢复有效文件，未全局退出或撤销账号。
+
+| 路径 | task_id | ASR 段数 | 准备 / ASR / 总计（秒） | 提交至终态墙钟（秒） |
+| --- | --- | ---: | ---: | ---: |
+| 强制 ASR | `d37721713aec49d3a7fd072a8a9a1489` | 26 | 3.110 / 4.497 / 7.739 | 8.077 |
+| 认证 no_tracks | `8f9863aa091e4504b0174c8e5fe78bb5` | 173 | 13.628 / 16.769 / 30.511 | 31.222 |
+| 模拟无效副本 | `713c809c19a14a2cb66f55da1798d05c` | 26 | 2.392 / 4.645 / 7.157 | 7.163 |
+
+三条 ASR 路径均保留真实 `asr.raw.json`、`asr_run` 和 `VAD_interval`，不与字幕时间来源混淆。全部隔离任务文件和探针（含日志、二进制媒体）共 190 个文件逐字节扫描，未发现有效或模拟凭据值。拥有的服务已正常 SIGTERM 停止（返回 `-15`），端口确认关闭。
+
+上述新增验收关闭本机认证字幕阳性、当前认证 `no_tracks`、字幕媒体升级及 force-ASR 保留的待办。真实账号自然过期仍未发生；N100 Ubuntu x86_64 / Python 3.10 新代码原生验收、最终 wheel 的原生 ASR 验收及云端 CI 仍未执行。此前两轮的待完成描述是各轮发生时的历史状态。运行源码冻结，因此本轮没有重复已通过的完整 pytest / mypy / build。
+
+本地脱敏证据：`workspace/validation-native/2026-10-25-bilibili-subtitle-first/authenticated-validation-report.md`、`native-probes/authenticated-live.json`、`authenticated-calls.json`、`authenticated-server.log` 与可复现启动脚本；任务原件和客户端输出留在该本地隔离目录，均不提交主仓库。
 
 ## 2026-10-20：历史版本验收
 
