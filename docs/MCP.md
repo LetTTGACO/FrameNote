@@ -59,16 +59,23 @@ MCP 的服务说明包含这套工作流，无需安装自定义 Skill。视频�
 隧道使用 OpenAI 的连接权限控制访问；本机 FrameNote MCP 自身没有 OAuth 服务。
 部署限于可信网络，不能把未鉴权的 HTTP API 直接公开到互联网。
 
-## 附带视频总结到 Space 的 Skill
+## 附带视频整理到 PersonalOS 的 Skill
 
 仓库的 `plugins/framenote/` 提供插件清单和 `video-to-space` Skill。
-Skill 使用 MCP 获取转录和截图，由 ChatGPT 撰写总结，再调用宿主的 Pages 工具保存到指定 Space。
-Space 权限由宿主控制；插件创建成功后还须验证 MCP 连接、Skill 加载和 Pages 写入。
+在 ChatGPT 网页端和手机端，FrameNote Skill 负责视频任务、材料阅读、证据核对及源图文件准备。
+保存时调用通用 Obsidain MCP Skill，先读取 vault 的 `AGENTS.md`，由其索引找到 `Videos.md`。
+归档产物、具体位置、命名、字段、文档结构及维护要求统一由知识库的 `Videos.md` 定义；
+目录操作、Markdown 写入、附件传输、版本保护和读回由 Obsidain MCP Skill 执行。
+FrameNote 根据读取的规则组织内容，并核对保存结果是否忠实于视频材料。用户指定的目标和范围优先。
+插件创建或源码更新后，还须分别验证连接、宿主加载的 Skill 及实际文件写入。
 
 用于 ChatGPT 网页端时，先按上节创建自定义 MCP 连接，再给它生成的插件添加
 `skills/video-to-space/SKILL.md`。更新时保留平台生成的插件身份、应用绑定和连接配置，
-只添加 Skill 并升级版本。通过插件管理页确认 Skill 已出现，刷新工具后，在选中该插件的
+更新 Skill 及其支持文件并升级版本。通过插件管理页确认 Skill 已出现，刷新工具后，在选中该插件的
 对话中验证一次实际调用。实际隧道标识、凭据和账户绑定保存在部署配置中。
 
-图片通过 MCP 返回供模型阅读；保存到 Space 需要宿主的图片附件能力。相对 HTTP 路径在隧道外不能直接访问，
-不得用作页面图片地址。附件能力不可用时，Skill 写入实际看过的画面说明、时间与来源，并报告图片未附入。
+图片通过 `get_frame` 返回供模型阅读。FrameNote 使用宿主能力把实际源图字节准备成可上传文件，
+核对源图大小与哈希后，将文件和按知识库规则确定的目标交给 Obsidain Skill 的通用附件流程。
+具体上传参数、同名保护与导出限制以 Obsidain 的当前 Skill 和工具契约为准。
+宿主缺少图片物化或文件上传能力时，保留已完成部分与任务/截图入口，明确缺项后续办。
+这条链路需在实际使用的 ChatGPT 网页、手机或 Codex 宿主中分别验证；源码发布不等于宿主联调通过。

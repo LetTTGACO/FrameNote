@@ -156,7 +156,8 @@ python3 -S skills/framenote/scripts/headless.py transcribe 'VIDEO_SOURCE' \
 
 在 ChatGPT 网页和手机端使用时，通过 OpenAI Secure MCP Tunnel 连接服务器的
 `http://127.0.0.1:18121/mcp`，创建私有插件。`plugins/framenote/` 中的 Skill
-指导 ChatGPT 将章节笔记保存到指定 Space。连接、工具与插件配置见 [MCP 指南](docs/MCP.md)。
+指导 ChatGPT 阅读视频，再通过 Obsidain MCP 读取知识库的 `Videos.md`，按其中规定的产物、位置和文档结构归档。
+连接、宿主源文件准备与插件配置见 [MCP 指南](docs/MCP.md)。
 
 按你要完成的任务选择文档：
 
